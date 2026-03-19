@@ -1,0 +1,50 @@
+# Mother Terminal Configuration
+
+# Per-model usage limits (duration strings: "5h", "4h30m", "0" for no tracking)
+[limits]
+claude = "5h"
+codex = "5h"
+gemini = "4h"
+opencode = "0"
+
+# Manually registered sessions
+# Auto-discovery finds most sessions automatically.
+# Use manual registration for edge cases or custom aliases.
+
+[[sessions]]
+name = "claude-main"
+cli = "claude"
+backend = "tmux"
+target = "dev:0.1"           # tmux session:window.pane
+policy = "auto_resume"
+resume_message = "continue"
+stall_timeout = "120s"
+
+[[sessions]]
+name = "codex-work"
+cli = "codex"
+backend = "macos"
+target = "iTerm2:Tab 3"
+policy = "notify"
+stall_timeout = "180s"
+
+# Scheduled pings for usage window activation
+
+[[schedules]]
+session = "claude-main"
+time = "07:00"
+repeat = "daily"
+probe = "active"
+
+[[schedules]]
+session = "codex-work"
+time = "09:00"
+repeat = "weekdays"
+probe = "active"
+
+# General settings
+[settings]
+state_dir = "~/.mother"         # Where to persist window state
+discovery_interval = "30s"      # How often to re-scan for sessions
+default_stall_timeout = "120s"  # Default stall timeout for sessions without explicit config
+default_policy = "notify"       # Default stall policy
