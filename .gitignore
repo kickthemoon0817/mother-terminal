@@ -1,0 +1,30 @@
+# Binaries
+mother
+motherctl
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Build
+/bin/
+/dist/
+
+# Go
+vendor/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OMC state
+.omc/
+
+# Mother Terminal state
+.mother/
