@@ -96,14 +96,13 @@ type Scheduler struct {
 	mu        sync.Mutex
 	service   *PingService
 	schedules []PingSchedule
-	stops     map[string]chan struct{}
+	stops     []chan struct{}
 }
 
 // NewScheduler creates a new ping scheduler.
 func NewScheduler(service *PingService) *Scheduler {
 	return &Scheduler{
 		service: service,
-		stops:   make(map[string]chan struct{}),
 	}
 }
 
@@ -121,7 +120,7 @@ func (s *Scheduler) Start() {
 
 	for _, sched := range s.schedules {
 		stop := make(chan struct{})
-		s.stops[sched.SessionName] = stop
+		s.stops = append(s.stops, stop)
 		go s.runSchedule(sched, stop)
 	}
 }
@@ -130,10 +129,10 @@ func (s *Scheduler) Start() {
 func (s *Scheduler) Stop() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for name, stop := range s.stops {
+	for _, stop := range s.stops {
 		close(stop)
-		delete(s.stops, name)
 	}
+	s.stops = nil
 }
 
 func (s *Scheduler) runSchedule(sched PingSchedule, stop chan struct{}) {

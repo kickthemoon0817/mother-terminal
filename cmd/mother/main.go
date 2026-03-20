@@ -51,7 +51,7 @@ func main() {
 		home, _ := os.UserHomeDir()
 		stateDir = filepath.Join(home, stateDir[2:])
 	}
-	os.MkdirAll(stateDir, 0755)
+	os.MkdirAll(stateDir, 0700)
 
 	// Initialize backend registry
 	reg := backend.NewRegistry()
