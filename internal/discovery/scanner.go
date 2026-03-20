@@ -16,13 +16,6 @@ type ProcessEntry struct {
 	CLI     pkg.CLIType
 }
 
-// KnownCLIs maps binary names to CLI types.
-var KnownCLIs = map[string]pkg.CLIType{
-	"claude":   pkg.CLIClaude,
-	"codex":    pkg.CLICodex,
-	"gemini":   pkg.CLIGemini,
-	"opencode": pkg.CLIOpenCode,
-}
 
 // Scanner scans running processes for known AI CLI binaries.
 type Scanner struct{}
@@ -74,7 +67,7 @@ func (s *Scanner) parsePS(output string) []ProcessEntry {
 		parts := strings.Split(comm, "/")
 		baseName := strings.ToLower(parts[len(parts)-1])
 
-		for name, cliType := range KnownCLIs {
+		for name, cliType := range pkg.KnownCLIs {
 			if strings.Contains(baseName, name) {
 				entries = append(entries, ProcessEntry{
 					PID:     pid,

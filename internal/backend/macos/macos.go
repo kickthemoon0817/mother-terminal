@@ -4,6 +4,7 @@ package macos
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -92,13 +93,6 @@ func (b *Backend) discoverITerm2() ([]pkg.Session, error) {
 }
 
 func (b *Backend) parseDiscoveredSessions(output, app string) []pkg.Session {
-	knownCLIs := map[string]pkg.CLIType{
-		"claude":   pkg.CLIClaude,
-		"codex":    pkg.CLICodex,
-		"gemini":   pkg.CLIGemini,
-		"opencode": pkg.CLIOpenCode,
-	}
-
 	var sessions []pkg.Session
 	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
 		if line == "" {
@@ -111,7 +105,7 @@ func (b *Backend) parseDiscoveredSessions(output, app string) []pkg.Session {
 		tabID := parts[0]
 		proc := parts[1]
 
-		for name, cliType := range knownCLIs {
+		for name, cliType := range pkg.KnownCLIs {
 			if strings.Contains(strings.ToLower(proc), name) {
 				target := fmt.Sprintf("%s:%s", app, tabID)
 				sessions = append(sessions, pkg.Session{
@@ -137,26 +131,36 @@ func (b *Backend) SendKeys(session pkg.Session, text string) error {
 	}
 	app := parts[0]
 
-	// Escape special characters in text for AppleScript
-	escaped := strings.ReplaceAll(text, `\`, `\\`)
-	escaped = strings.ReplaceAll(escaped, `"`, `\"`)
-
-	var script string
-	switch app {
-	case "Terminal":
-		script = fmt.Sprintf(`tell application "Terminal"
-			activate
-			do script "%s" in front window
-		end tell`, escaped)
-	case "iTerm2":
-		script = fmt.Sprintf(`tell application "iTerm2"
-			tell current session of current tab of current window
-				write text "%s"
-			end tell
-		end tell`, escaped)
-	default:
-		return fmt.Errorf("%w: unsupported macOS terminal app %q", pkg.ErrSendKeysFailed, app)
+	// Write text to a temp file to avoid AppleScript injection.
+	// Never interpolate user text into AppleScript string literals.
+	tmpFile, err := os.CreateTemp("", "mother-input-*")
+	if err != nil {
+		return fmt.Errorf("%w: failed to create temp file: %v", pkg.ErrSendKeysFailed, err)
 	}
+	defer os.Remove(tmpFile.Name())
+
+	if _, err := tmpFile.WriteString(text + "\n"); err != nil {
+		tmpFile.Close()
+		return fmt.Errorf("%w: failed to write temp file: %v", pkg.ErrSendKeysFailed, err)
+	}
+	tmpFile.Close()
+
+	// Use keystroke-based injection via System Events to type into the
+	// frontmost window of the target app. This avoids `do script` which
+	// opens a new shell, and avoids interpolating text into AppleScript.
+	script := fmt.Sprintf(`
+		set inputText to (read POSIX file %q)
+		-- Remove trailing newline from file read
+		if inputText ends with linefeed then
+			set inputText to text 1 thru -2 of inputText
+		end if
+		tell application %q to activate
+		delay 0.3
+		tell application "System Events"
+			keystroke inputText
+			keystroke return
+		end tell
+	`, tmpFile.Name(), app)
 
 	if err := exec.Command("osascript", "-e", script).Run(); err != nil {
 		return fmt.Errorf("%w: osascript send to %s: %v", pkg.ErrSendKeysFailed, session.Target, err)

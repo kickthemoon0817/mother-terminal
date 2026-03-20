@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
@@ -32,13 +33,6 @@ func (b *Backend) Discover() ([]pkg.Session, error) {
 	// Wayland has no universal window enumeration API.
 	// Fall back to process scanning — discovery/scanner.go handles this.
 	// We can only verify sessions that were registered manually or found by process scan.
-	knownCLIs := map[string]pkg.CLIType{
-		"claude":   pkg.CLIClaude,
-		"codex":    pkg.CLICodex,
-		"gemini":   pkg.CLIGemini,
-		"opencode": pkg.CLIOpenCode,
-	}
-
 	var sessions []pkg.Session
 
 	// Scan /proc for known CLI processes
@@ -55,7 +49,7 @@ func (b *Backend) Discover() ([]pkg.Session, error) {
 		pid := fields[0]
 		comm := fields[1]
 
-		for name, cliType := range knownCLIs {
+		for name, cliType := range pkg.KnownCLIs {
 			if strings.Contains(strings.ToLower(comm), name) {
 				sessions = append(sessions, pkg.Session{
 					ID:      fmt.Sprintf("wayland-pid-%s", pid),
@@ -99,11 +93,16 @@ func (b *Backend) ReadOutput(session pkg.Session, lines int) (string, error) {
 func (b *Backend) Ping(session pkg.Session) (pkg.PingResult, error) {
 	start := time.Now()
 
-	// Check if the process is still alive
+	// Validate target is a positive integer PID before use
 	alive := false
 	if session.Target != "" {
-		err := exec.Command("kill", "-0", session.Target).Run()
-		alive = err == nil
+		pid, err := strconv.ParseInt(session.Target, 10, 64)
+		if err != nil || pid <= 0 {
+			return pkg.PingResult{}, fmt.Errorf("invalid PID %q", session.Target)
+		}
+		// Check /proc on Linux instead of kill -0 to avoid signal delivery
+		_, statErr := os.Stat(fmt.Sprintf("/proc/%d", pid))
+		alive = statErr == nil
 	}
 
 	return pkg.PingResult{
