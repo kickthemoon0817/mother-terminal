@@ -6,14 +6,15 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/kickthemoon0817/mother-terminal/pkg"
 )
 
-// Backend implements the Injector interface for Wayland terminals.
+// Backend implements the Injector interface for Linux Wayland terminals.
+// Uses process scanning + TTY identification for universal terminal support.
+// ydotool is NOT required — direct TTY write bypasses the display protocol.
 type Backend struct{}
 
 func (b *Backend) Name() pkg.BackendType {
@@ -21,93 +22,204 @@ func (b *Backend) Name() pkg.BackendType {
 }
 
 func (b *Backend) IsAvailable() bool {
-	// Check for Wayland session
-	if os.Getenv("WAYLAND_DISPLAY") == "" {
-		return false
-	}
-	_, err := exec.LookPath("ydotool")
-	return err == nil
+	// Available on any Linux with Wayland display
+	return os.Getenv("WAYLAND_DISPLAY") != ""
 }
 
 func (b *Backend) Discover() ([]pkg.Session, error) {
-	// Wayland has no universal window enumeration API.
-	// Fall back to process scanning — discovery/scanner.go handles this.
-	// We can only verify sessions that were registered manually or found by process scan.
-	var sessions []pkg.Session
-
-	// Scan /proc for known CLI processes
-	out, err := exec.Command("ps", "-eo", "pid,comm").Output()
-	if err != nil {
+	procs, err := b.scanProcesses()
+	if err != nil || len(procs) == 0 {
 		return nil, nil
 	}
 
+	var sessions []pkg.Session
+	seen := make(map[string]bool)
+
+	for _, p := range procs {
+		if p.TTY == "" || p.TTY == "?" || seen[p.TTY] {
+			continue
+		}
+		seen[p.TTY] = true
+
+		// On Linux, TTYs from ps are like "pts/1" — map to /dev/pts/1
+		ttyPath := "/dev/" + p.TTY
+		if _, err := os.Stat(ttyPath); err != nil {
+			continue
+		}
+
+		sessions = append(sessions, pkg.Session{
+			ID:      fmt.Sprintf("wayland-%s-%s", p.CLI, p.PID),
+			Name:    fmt.Sprintf("%s-%s", p.CLI, p.TTY),
+			CLI:     p.CLI,
+			Backend: pkg.BackendWayland,
+			Target:  ttyPath, // e.g., /dev/pts/1
+			Status:  pkg.StatusDiscovered,
+			Policy:  pkg.PolicyNotify,
+		})
+	}
+
+	return sessions, nil
+}
+
+type discoveredProcess struct {
+	PID       string
+	TTY       string
+	CLI       pkg.CLIType
+	Command   string
+	ParentApp string
+}
+
+func (b *Backend) scanProcesses() ([]discoveredProcess, error) {
+	out, err := exec.Command("ps", "-eo", "pid,tty,ppid,comm").Output()
+	if err != nil {
+		return nil, err
+	}
+
+	pidComm := make(map[string]string)
 	for _, line := range strings.Split(string(out), "\n") {
 		fields := strings.Fields(line)
-		if len(fields) < 2 {
+		if len(fields) >= 4 {
+			pidComm[fields[0]] = fields[3]
+		}
+	}
+
+	var procs []discoveredProcess
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 4 {
 			continue
 		}
 		pid := fields[0]
-		comm := fields[1]
+		tty := fields[1]
+		ppid := fields[2]
+		comm := fields[3]
+
+		parts := strings.Split(comm, "/")
+		baseName := strings.ToLower(parts[len(parts)-1])
 
 		for name, cliType := range pkg.KnownCLIs {
-			if strings.Contains(strings.ToLower(comm), name) {
-				sessions = append(sessions, pkg.Session{
-					ID:      fmt.Sprintf("wayland-pid-%s", pid),
-					Name:    fmt.Sprintf("%s-wayland-%s", name, pid),
-					CLI:     cliType,
-					Backend: pkg.BackendWayland,
-					Target:  pid,
-					Status:  pkg.StatusDiscovered,
-					Policy:  pkg.PolicyNotify,
+			if baseName == name {
+				parentApp := traceParentApp(ppid, pidComm)
+				procs = append(procs, discoveredProcess{
+					PID:       pid,
+					TTY:       tty,
+					CLI:       cliType,
+					Command:   comm,
+					ParentApp: parentApp,
 				})
 				break
 			}
 		}
 	}
 
-	return sessions, nil
+	return procs, nil
+}
+
+// traceParentApp walks up the process tree to find the terminal app.
+func traceParentApp(ppid string, pidComm map[string]string) string {
+	visited := make(map[string]bool)
+	current := ppid
+
+	for i := 0; i < 10; i++ {
+		if current == "" || current == "0" || current == "1" || visited[current] {
+			break
+		}
+		visited[current] = true
+
+		comm, ok := pidComm[current]
+		if !ok {
+			break
+		}
+
+		lower := strings.ToLower(comm)
+		switch {
+		case strings.Contains(lower, "gnome-terminal"):
+			return "GNOME Terminal"
+		case strings.Contains(lower, "konsole"):
+			return "Konsole"
+		case strings.Contains(lower, "alacritty"):
+			return "Alacritty"
+		case strings.Contains(lower, "kitty"):
+			return "Kitty"
+		case strings.Contains(lower, "wezterm"):
+			return "WezTerm"
+		case strings.Contains(lower, "foot"):
+			return "Foot"
+		case strings.Contains(lower, "code") && strings.Contains(lower, "helper"):
+			return "VS Code"
+		case strings.Contains(lower, "tilix"):
+			return "Tilix"
+		}
+
+		// Read parent's parent from /proc
+		ppidBytes, err := os.ReadFile(fmt.Sprintf("/proc/%s/stat", current))
+		if err != nil {
+			break
+		}
+		statFields := strings.Fields(string(ppidBytes))
+		if len(statFields) < 4 {
+			break
+		}
+		current = statFields[3]
+	}
+
+	return "unknown"
 }
 
 func (b *Backend) SendKeys(session pkg.Session, text string) error {
-	// ydotool types text globally to the focused window.
-	// The caller must ensure the correct window is focused.
-	if err := exec.Command("ydotool", "type", "--key-delay", "10", text).Run(); err != nil {
-		return fmt.Errorf("%w: ydotool type: %v", pkg.ErrSendKeysFailed, err)
+	ttyPath := session.Target
+	if !strings.HasPrefix(ttyPath, "/dev/") {
+		return fmt.Errorf("%w: invalid TTY target %q", pkg.ErrSendKeysFailed, ttyPath)
 	}
 
-	// Press Enter (key code 28 = Enter in ydotool)
-	if err := exec.Command("ydotool", "key", "28:1", "28:0").Run(); err != nil {
-		return fmt.Errorf("%w: ydotool key Enter: %v", pkg.ErrSendKeysFailed, err)
+	// Write directly to the TTY device — bypasses Wayland protocol entirely.
+	// No ydotool needed, no window focus issues.
+	f, err := os.OpenFile(ttyPath, os.O_WRONLY, 0)
+	if err != nil {
+		return fmt.Errorf("%w: cannot open TTY %s: %v", pkg.ErrSendKeysFailed, ttyPath, err)
+	}
+	defer f.Close()
+
+	_, err = f.WriteString(text + "\n")
+	if err != nil {
+		return fmt.Errorf("%w: write to TTY %s: %v", pkg.ErrSendKeysFailed, ttyPath, err)
 	}
 
 	return nil
 }
 
 func (b *Backend) ReadOutput(session pkg.Session, lines int) (string, error) {
-	// Wayland has no universal terminal output capture mechanism.
-	// This is a known limitation of the Wayland protocol — compositors
-	// do not expose window content to other applications.
-	return "", fmt.Errorf("%w: Wayland backend does not support output capture — use tmux backend for output reading", pkg.ErrReadOutputFailed)
+	// Wayland protocol does not expose window content to other applications.
+	// Direct TTY reading is not supported from outside the session.
+	// For reliable output reading, use the tmux backend.
+	return "", fmt.Errorf("%w: Wayland backend does not support output capture — use tmux for output reading", pkg.ErrReadOutputFailed)
 }
 
 func (b *Backend) Ping(session pkg.Session) (pkg.PingResult, error) {
 	start := time.Now()
 
-	// Validate target is a positive integer PID before use
-	alive := false
-	if session.Target != "" {
-		pid, err := strconv.ParseInt(session.Target, 10, 64)
-		if err != nil || pid <= 0 {
-			return pkg.PingResult{}, fmt.Errorf("invalid PID %q", session.Target)
+	ttyPath := session.Target
+	if !strings.HasPrefix(ttyPath, "/dev/") {
+		return pkg.PingResult{}, nil
+	}
+
+	// Check if the TTY device still exists
+	info, err := os.Stat(ttyPath)
+	alive := err == nil && info.Mode()&os.ModeCharDevice != 0
+
+	// Check if we can open the TTY for writing
+	responsive := false
+	if alive {
+		f, err := os.OpenFile(ttyPath, os.O_WRONLY, 0)
+		if err == nil {
+			responsive = true
+			f.Close()
 		}
-		// Check /proc on Linux instead of kill -0 to avoid signal delivery
-		_, statErr := os.Stat(fmt.Sprintf("/proc/%d", pid))
-		alive = statErr == nil
 	}
 
 	return pkg.PingResult{
 		Alive:      alive,
-		Responsive: alive, // Best effort — we can't verify terminal responsiveness on Wayland
+		Responsive: responsive,
 		Latency:    time.Since(start),
 	}, nil
 }

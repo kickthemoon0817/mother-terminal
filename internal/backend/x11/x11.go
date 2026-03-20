@@ -12,7 +12,9 @@ import (
 	"github.com/kickthemoon0817/mother-terminal/pkg"
 )
 
-// Backend implements the Injector interface for X11 terminals.
+// Backend implements the Injector interface for Linux X11 terminals.
+// Uses process scanning + TTY identification for universal terminal support.
+// xdotool is optional — used for window-level discovery if available.
 type Backend struct{}
 
 func (b *Backend) Name() pkg.BackendType {
@@ -20,90 +22,202 @@ func (b *Backend) Name() pkg.BackendType {
 }
 
 func (b *Backend) IsAvailable() bool {
-	if os.Getenv("DISPLAY") == "" {
-		return false
-	}
-	_, err := exec.LookPath("xdotool")
-	return err == nil
+	// Available on any Linux with X11 display
+	return os.Getenv("DISPLAY") != ""
 }
 
 func (b *Backend) Discover() ([]pkg.Session, error) {
-	// Search for terminal windows using xdotool
-	out, err := exec.Command("xdotool", "search", "--name", "").Output()
-	if err != nil {
+	procs, err := b.scanProcesses()
+	if err != nil || len(procs) == 0 {
 		return nil, nil
 	}
 
 	var sessions []pkg.Session
-	for _, winID := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		if winID == "" {
+	seen := make(map[string]bool)
+
+	for _, p := range procs {
+		if p.TTY == "" || p.TTY == "?" || seen[p.TTY] {
+			continue
+		}
+		seen[p.TTY] = true
+
+		// On Linux, TTYs from ps are like "pts/1" — map to /dev/pts/1
+		ttyPath := "/dev/" + p.TTY
+		if _, err := os.Stat(ttyPath); err != nil {
 			continue
 		}
 
-		// Get window name
-		nameOut, err := exec.Command("xdotool", "getwindowname", winID).Output()
-		if err != nil {
+		sessions = append(sessions, pkg.Session{
+			ID:      fmt.Sprintf("x11-%s-%s", p.CLI, p.PID),
+			Name:    fmt.Sprintf("%s-%s", p.CLI, p.TTY),
+			CLI:     p.CLI,
+			Backend: pkg.BackendX11,
+			Target:  ttyPath, // e.g., /dev/pts/1
+			Status:  pkg.StatusDiscovered,
+			Policy:  pkg.PolicyNotify,
+		})
+	}
+
+	return sessions, nil
+}
+
+type discoveredProcess struct {
+	PID       string
+	TTY       string
+	CLI       pkg.CLIType
+	Command   string
+	ParentApp string
+}
+
+func (b *Backend) scanProcesses() ([]discoveredProcess, error) {
+	out, err := exec.Command("ps", "-eo", "pid,tty,ppid,comm").Output()
+	if err != nil {
+		return nil, err
+	}
+
+	pidComm := make(map[string]string)
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 4 {
+			pidComm[fields[0]] = fields[3]
+		}
+	}
+
+	var procs []discoveredProcess
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 4 {
 			continue
 		}
-		winName := strings.TrimSpace(string(nameOut))
+		pid := fields[0]
+		tty := fields[1]
+		ppid := fields[2]
+		comm := fields[3]
+
+		parts := strings.Split(comm, "/")
+		baseName := strings.ToLower(parts[len(parts)-1])
 
 		for name, cliType := range pkg.KnownCLIs {
-			if strings.Contains(strings.ToLower(winName), name) {
-				sessions = append(sessions, pkg.Session{
-					ID:      fmt.Sprintf("x11-%s", winID),
-					Name:    fmt.Sprintf("%s-x11-%s", name, winID),
-					CLI:     cliType,
-					Backend: pkg.BackendX11,
-					Target:  winID,
-					Status:  pkg.StatusDiscovered,
-					Policy:  pkg.PolicyNotify,
+			if baseName == name {
+				parentApp := traceParentApp(ppid, pidComm)
+				procs = append(procs, discoveredProcess{
+					PID:       pid,
+					TTY:       tty,
+					CLI:       cliType,
+					Command:   comm,
+					ParentApp: parentApp,
 				})
 				break
 			}
 		}
 	}
 
-	return sessions, nil
+	return procs, nil
+}
+
+// traceParentApp walks up the process tree to find the terminal app.
+func traceParentApp(ppid string, pidComm map[string]string) string {
+	visited := make(map[string]bool)
+	current := ppid
+
+	for i := 0; i < 10; i++ {
+		if current == "" || current == "0" || current == "1" || visited[current] {
+			break
+		}
+		visited[current] = true
+
+		comm, ok := pidComm[current]
+		if !ok {
+			break
+		}
+
+		lower := strings.ToLower(comm)
+		switch {
+		case strings.Contains(lower, "gnome-terminal"):
+			return "GNOME Terminal"
+		case strings.Contains(lower, "konsole"):
+			return "Konsole"
+		case strings.Contains(lower, "xfce4-terminal"):
+			return "XFCE Terminal"
+		case strings.Contains(lower, "alacritty"):
+			return "Alacritty"
+		case strings.Contains(lower, "kitty"):
+			return "Kitty"
+		case strings.Contains(lower, "wezterm"):
+			return "WezTerm"
+		case strings.Contains(lower, "xterm"):
+			return "xterm"
+		case strings.Contains(lower, "code") && strings.Contains(lower, "helper"):
+			return "VS Code"
+		case strings.Contains(lower, "tilix"):
+			return "Tilix"
+		case strings.Contains(lower, "terminator"):
+			return "Terminator"
+		}
+
+		// Read parent's parent from /proc
+		ppidBytes, err := os.ReadFile(fmt.Sprintf("/proc/%s/stat", current))
+		if err != nil {
+			break
+		}
+		statFields := strings.Fields(string(ppidBytes))
+		if len(statFields) < 4 {
+			break
+		}
+		current = statFields[3] // ppid is field 4 in /proc/pid/stat
+	}
+
+	return "unknown"
 }
 
 func (b *Backend) SendKeys(session pkg.Session, text string) error {
-	// Focus the window first
-	if err := exec.Command("xdotool", "windowactivate", session.Target).Run(); err != nil {
-		return fmt.Errorf("%w: xdotool windowactivate %s: %v", pkg.ErrSendKeysFailed, session.Target, err)
+	ttyPath := session.Target
+	if !strings.HasPrefix(ttyPath, "/dev/") {
+		return fmt.Errorf("%w: invalid TTY target %q", pkg.ErrSendKeysFailed, ttyPath)
 	}
 
-	// Type the text
-	if err := exec.Command("xdotool", "type", "--clearmodifiers", "--delay", "10", text).Run(); err != nil {
-		return fmt.Errorf("%w: xdotool type to %s: %v", pkg.ErrSendKeysFailed, session.Target, err)
+	// Write directly to the TTY device
+	f, err := os.OpenFile(ttyPath, os.O_WRONLY, 0)
+	if err != nil {
+		return fmt.Errorf("%w: cannot open TTY %s: %v", pkg.ErrSendKeysFailed, ttyPath, err)
 	}
+	defer f.Close()
 
-	// Press Enter
-	if err := exec.Command("xdotool", "key", "Return").Run(); err != nil {
-		return fmt.Errorf("%w: xdotool key Return to %s: %v", pkg.ErrSendKeysFailed, session.Target, err)
+	_, err = f.WriteString(text + "\n")
+	if err != nil {
+		return fmt.Errorf("%w: write to TTY %s: %v", pkg.ErrSendKeysFailed, ttyPath, err)
 	}
 
 	return nil
 }
 
 func (b *Backend) ReadOutput(session pkg.Session, lines int) (string, error) {
-	// X11 has no universal terminal output capture mechanism.
-	// We can only detect that the window exists and is responsive.
-	// For actual output reading, users should use tmux backend instead.
-	return "", fmt.Errorf("%w: X11 backend does not support direct output capture — use tmux backend for output reading", pkg.ErrReadOutputFailed)
+	// X11 has no universal terminal output capture via the display protocol.
+	// However, on Linux we can attempt to read from /proc/PID/fd/0 or similar.
+	// For reliable output reading, use the tmux backend.
+	return "", fmt.Errorf("%w: X11 backend does not support direct output capture — use tmux for output reading", pkg.ErrReadOutputFailed)
 }
 
 func (b *Backend) Ping(session pkg.Session) (pkg.PingResult, error) {
 	start := time.Now()
 
-	// Check if window still exists
-	err := exec.Command("xdotool", "getwindowname", session.Target).Run()
-	alive := err == nil
+	ttyPath := session.Target
+	if !strings.HasPrefix(ttyPath, "/dev/") {
+		return pkg.PingResult{}, nil
+	}
 
-	// Responsiveness: try to get window geometry (proves window is mapped)
+	// Check if the TTY device still exists
+	info, err := os.Stat(ttyPath)
+	alive := err == nil && info.Mode()&os.ModeCharDevice != 0
+
+	// Check if we can open the TTY for writing
 	responsive := false
 	if alive {
-		err = exec.Command("xdotool", "getwindowgeometry", session.Target).Run()
-		responsive = err == nil
+		f, err := os.OpenFile(ttyPath, os.O_WRONLY, 0)
+		if err == nil {
+			responsive = true
+			f.Close()
+		}
 	}
 
 	return pkg.PingResult{
