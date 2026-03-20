@@ -10,6 +10,8 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/kickthemoon0817/mother-terminal/internal/backend"
+	"github.com/kickthemoon0817/mother-terminal/internal/history"
+	"github.com/kickthemoon0817/mother-terminal/internal/remote"
 	"github.com/kickthemoon0817/mother-terminal/internal/scheduler"
 	"github.com/kickthemoon0817/mother-terminal/internal/session"
 	"github.com/kickthemoon0817/mother-terminal/pkg"
@@ -94,12 +96,15 @@ type Model struct {
 	registry *backend.Registry
 	windows  *scheduler.WindowTracker
 	monitor  *session.Monitor
+	recorder *history.Recorder
+	remotes  *remote.Client
 
 	mode     viewMode
 	cursor   int
 	sessions []pkg.Session
 	selected *pkg.Session
 	input    InputModel
+	message  string // status message displayed briefly
 	width    int
 	height   int
 	err      error
@@ -111,12 +116,16 @@ func NewModel(
 	registry *backend.Registry,
 	windows *scheduler.WindowTracker,
 	monitor *session.Monitor,
+	recorder *history.Recorder,
+	remotes *remote.Client,
 ) Model {
 	return Model{
 		manager:  manager,
 		registry: registry,
 		windows:  windows,
 		monitor:  monitor,
+		recorder: recorder,
+		remotes:  remotes,
 		mode:     viewDashboard,
 		input:    NewInputModel(),
 	}
@@ -165,13 +174,36 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case spawnMsg:
 		if msg.err != nil {
-			m.err = msg.err
+			m.message = fmt.Sprintf("spawn error: %v", msg.err)
 			return m, nil
 		}
 		if msg.session != nil {
 			m.manager.AddOrUpdate(*msg.session)
+			if m.recorder != nil {
+				m.recorder.Record(*msg.session)
+			}
 			m.sessions = m.manager.List()
+			m.message = fmt.Sprintf("spawned: %s", msg.session.Name)
 		}
+		return m, nil
+
+	case messageMsg:
+		m.message = msg.text
+		return m, nil
+
+	case remoteSessionsMsg:
+		if msg.err != nil {
+			m.message = fmt.Sprintf("remote discover error: %v", msg.err)
+			return m, nil
+		}
+		for _, s := range msg.sessions {
+			m.manager.AddOrUpdate(s)
+			if m.recorder != nil {
+				m.recorder.Record(s)
+			}
+		}
+		m.sessions = m.manager.List()
+		m.message = fmt.Sprintf("discovered %d remote sessions", len(msg.sessions))
 		return m, nil
 	}
 
@@ -264,8 +296,73 @@ func (m Model) handleInputSubmit() (tea.Model, tea.Cmd) {
 
 	case strings.HasPrefix(value, "/spawn "):
 		// /spawn claude — start a new AI CLI session in a tmux pane
-		cliName := strings.TrimSpace(strings.TrimPrefix(value, "/spawn"))
-		return m, m.spawnSession(cliName)
+		// /spawn claude --remote myserver
+		args := strings.TrimSpace(strings.TrimPrefix(value, "/spawn"))
+		if strings.Contains(args, "--remote ") {
+			parts := strings.SplitN(args, "--remote ", 2)
+			cliName := strings.TrimSpace(parts[0])
+			hostName := strings.TrimSpace(parts[1])
+			return m, m.spawnRemoteSession(cliName, hostName)
+		}
+		return m, m.spawnSession(args)
+
+	case strings.HasPrefix(value, "/history"):
+		// /history — show history for selected session
+		// /history search <query> — search across all sessions
+		arg := strings.TrimSpace(strings.TrimPrefix(value, "/history"))
+		if strings.HasPrefix(arg, "search ") {
+			query := strings.TrimSpace(strings.TrimPrefix(arg, "search"))
+			return m, m.searchHistory(query)
+		}
+		if m.selected != nil && m.recorder != nil {
+			hist, err := m.recorder.GetHistory(m.selected.Name, 50)
+			if err != nil {
+				m.message = err.Error()
+			} else {
+				m.message = hist
+			}
+		}
+		return m, nil
+
+	case strings.HasPrefix(value, "/connect "):
+		// /connect user@host — register a remote host
+		address := strings.TrimSpace(strings.TrimPrefix(value, "/connect"))
+		parts := strings.SplitN(address, "@", 2)
+		name := address
+		if len(parts) == 2 {
+			name = parts[1]
+		}
+		if m.remotes != nil {
+			m.remotes.AddHost(name, address)
+			m.message = fmt.Sprintf("connected: %s", address)
+		}
+		return m, nil
+
+	case strings.HasPrefix(value, "/discover "):
+		// /discover hostname — discover sessions on remote host
+		hostName := strings.TrimSpace(strings.TrimPrefix(value, "/discover"))
+		return m, m.discoverRemote(hostName)
+
+	case value == "/hosts":
+		// List registered remote hosts
+		if m.remotes != nil {
+			hosts := m.remotes.ListHosts()
+			if len(hosts) == 0 {
+				m.message = "no remote hosts registered — use /connect user@host"
+			} else {
+				var lines []string
+				for _, h := range hosts {
+					lines = append(lines, fmt.Sprintf("  %s (%s)", h.Name, h.Address))
+				}
+				m.message = "remote hosts:\n" + strings.Join(lines, "\n")
+			}
+		}
+		return m, nil
+
+	case strings.HasPrefix(value, "/ping "):
+		// /ping hostname — ping a remote host
+		hostName := strings.TrimSpace(strings.TrimPrefix(value, "/ping"))
+		return m, m.pingRemote(hostName)
 
 	default:
 		// If in detail view with a selected session, send as query
@@ -408,6 +505,78 @@ func (m Model) spawnSession(cliName string) tea.Cmd {
 		}
 
 		return spawnMsg{session: sess}
+	}
+}
+
+// messageMsg carries a status message to display.
+type messageMsg struct{ text string }
+
+// remoteSessionsMsg carries discovered remote sessions.
+type remoteSessionsMsg struct {
+	sessions []pkg.Session
+	err      error
+}
+
+func (m Model) spawnRemoteSession(cliName, hostName string) tea.Cmd {
+	return func() tea.Msg {
+		if m.remotes == nil {
+			return spawnMsg{err: fmt.Errorf("remote client not initialized")}
+		}
+		sess, err := m.remotes.Spawn(hostName, cliName)
+		if err != nil {
+			return spawnMsg{err: err}
+		}
+		return spawnMsg{session: sess}
+	}
+}
+
+func (m Model) searchHistory(query string) tea.Cmd {
+	return func() tea.Msg {
+		if m.recorder == nil {
+			return messageMsg{text: "history not available"}
+		}
+		results, err := m.recorder.Search(query)
+		if err != nil {
+			return messageMsg{text: fmt.Sprintf("search error: %v", err)}
+		}
+		if len(results) == 0 {
+			return messageMsg{text: fmt.Sprintf("no results for %q", query)}
+		}
+		var lines []string
+		for _, r := range results {
+			if len(lines) >= 20 {
+				lines = append(lines, fmt.Sprintf("  ... and %d more", len(results)-20))
+				break
+			}
+			lines = append(lines, fmt.Sprintf("  [%s:%d] %s", r.Session, r.Line, r.Content))
+		}
+		return messageMsg{text: strings.Join(lines, "\n")}
+	}
+}
+
+func (m Model) discoverRemote(hostName string) tea.Cmd {
+	return func() tea.Msg {
+		if m.remotes == nil {
+			return messageMsg{text: "remote client not initialized"}
+		}
+		sessions, err := m.remotes.DiscoverRemote(hostName)
+		return remoteSessionsMsg{sessions: sessions, err: err}
+	}
+}
+
+func (m Model) pingRemote(hostName string) tea.Cmd {
+	return func() tea.Msg {
+		if m.remotes == nil {
+			return messageMsg{text: "remote client not initialized"}
+		}
+		ok, latency, err := m.remotes.Ping(hostName)
+		if err != nil {
+			return messageMsg{text: fmt.Sprintf("ping %s: error %v", hostName, err)}
+		}
+		if ok {
+			return messageMsg{text: fmt.Sprintf("ping %s: ok (%v)", hostName, latency)}
+		}
+		return messageMsg{text: fmt.Sprintf("ping %s: unreachable (%v)", hostName, latency)}
 	}
 }
 

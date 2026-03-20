@@ -10,6 +10,8 @@ import (
 	"github.com/kickthemoon0817/mother-terminal/internal/backend"
 	"github.com/kickthemoon0817/mother-terminal/internal/config"
 	"github.com/kickthemoon0817/mother-terminal/internal/discovery"
+	"github.com/kickthemoon0817/mother-terminal/internal/history"
+	"github.com/kickthemoon0817/mother-terminal/internal/remote"
 	"github.com/kickthemoon0817/mother-terminal/internal/scheduler"
 	"github.com/kickthemoon0817/mother-terminal/internal/session"
 	"github.com/kickthemoon0817/mother-terminal/internal/tui"
@@ -125,8 +127,21 @@ func main() {
 	defer sched.Stop()
 	defer mon.UnwatchAll()
 
+	// Initialize history recorder
+	historyDir := filepath.Join(stateDir, "history")
+	recorder := history.NewRecorder(reg, historyDir, 5*time.Second)
+	defer recorder.StopAll()
+
+	// Start recording for all discovered sessions
+	for _, s := range mgr.List() {
+		recorder.Record(s)
+	}
+
+	// Initialize remote client
+	remotes := remote.NewClient()
+
 	// Start TUI
-	model := tui.NewModel(mgr, reg, windowTracker, mon)
+	model := tui.NewModel(mgr, reg, windowTracker, mon, recorder, remotes)
 	if err := tui.Run(model); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
