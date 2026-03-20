@@ -62,6 +62,13 @@ type Session struct {
 	Policy        StallPolicy   `toml:"policy"`
 	ResumeMessage string        `toml:"resume_message"`
 	StallTimeout  time.Duration `toml:"stall_timeout"`
+
+	// Identifying metadata (populated by discovery)
+	PID       string `toml:"-"`
+	CWD       string `toml:"-"` // working directory
+	Args      string `toml:"-"` // full command with arguments
+	StartTime string `toml:"-"` // process start time
+	ParentApp string `toml:"-"` // terminal app (VS Code, iTerm2, etc.)
 }
 
 // PingResult holds the result of a ping operation.

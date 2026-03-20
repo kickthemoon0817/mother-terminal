@@ -56,14 +56,29 @@ func (b *Backend) Discover() ([]pkg.Session, error) {
 			continue
 		}
 
+		// Gather identifying metadata
+		cwd, args, startTime := b.getProcessMeta(p.PID)
+
+		// Use CWD basename for a friendlier name
+		displayName := fmt.Sprintf("%s-%s", p.CLI, p.TTY)
+		if cwd != "" {
+			parts := strings.Split(cwd, "/")
+			displayName = fmt.Sprintf("%s [%s]", p.CLI, parts[len(parts)-1])
+		}
+
 		sessions = append(sessions, pkg.Session{
-			ID:      fmt.Sprintf("macos-%s-%s", p.CLI, p.PID),
-			Name:    fmt.Sprintf("%s-%s", p.CLI, p.TTY),
-			CLI:     p.CLI,
-			Backend: pkg.BackendMacOS,
-			Target:  ttyPath, // e.g., /dev/ttys001
-			Status:  pkg.StatusDiscovered,
-			Policy:  pkg.PolicyNotify,
+			ID:        fmt.Sprintf("macos-%s-%s", p.CLI, p.PID),
+			Name:      displayName,
+			CLI:       p.CLI,
+			Backend:   pkg.BackendMacOS,
+			Target:    ttyPath,
+			Status:    pkg.StatusDiscovered,
+			Policy:    pkg.PolicyNotify,
+			PID:       p.PID,
+			CWD:       cwd,
+			Args:      args,
+			StartTime: startTime,
+			ParentApp: p.ParentApp,
 		})
 	}
 
@@ -120,6 +135,37 @@ func (b *Backend) scanProcesses() ([]discoveredProcess, error) {
 	}
 
 	return procs, nil
+}
+
+// getProcessMeta retrieves CWD, full args, and start time for a process.
+func (b *Backend) getProcessMeta(pid string) (cwd, args, startTime string) {
+	// Working directory via lsof
+	out, err := exec.Command("lsof", "-p", pid).Output()
+	if err == nil {
+		for _, line := range strings.Split(string(out), "\n") {
+			if strings.Contains(line, "cwd") {
+				fields := strings.Fields(line)
+				if len(fields) > 0 {
+					cwd = fields[len(fields)-1]
+				}
+				break
+			}
+		}
+	}
+
+	// Full command with arguments
+	out, err = exec.Command("ps", "-o", "args=", "-p", pid).Output()
+	if err == nil {
+		args = strings.TrimSpace(string(out))
+	}
+
+	// Start time
+	out, err = exec.Command("ps", "-o", "lstart=", "-p", pid).Output()
+	if err == nil {
+		startTime = strings.TrimSpace(string(out))
+	}
+
+	return
 }
 
 // traceParentApp walks up the process tree to find the terminal app.

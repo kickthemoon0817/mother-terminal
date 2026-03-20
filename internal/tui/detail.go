@@ -13,19 +13,39 @@ func (m Model) detailView() string {
 	sess := m.selected
 	var b strings.Builder
 
-	b.WriteString(fmt.Sprintf("╔══════════════════════════════════════════════════════════╗\n"))
-	b.WriteString(fmt.Sprintf("║  Session: %-47s ║\n", sess.Name))
-	b.WriteString(fmt.Sprintf("╚══════════════════════════════════════════════════════════╝\n\n"))
+	b.WriteString("╔══════════════════════════════════════════════════════════════════╗\n")
+	b.WriteString(fmt.Sprintf("║  Session: %-55s ║\n", truncate(sess.Name, 55)))
+	b.WriteString("╚══════════════════════════════════════════════════════════════════╝\n\n")
 
-	// Metadata
-	b.WriteString(fmt.Sprintf("  CLI:      %s\n", sess.CLI))
-	b.WriteString(fmt.Sprintf("  Backend:  %s\n", sess.Backend))
-	b.WriteString(fmt.Sprintf("  Target:   %s\n", sess.Target))
-	b.WriteString(fmt.Sprintf("  Status:   %s\n", formatStatus(sess.Status)))
-	b.WriteString(fmt.Sprintf("  Policy:   %s\n", sess.Policy))
+	// Session identity
+	b.WriteString(fmt.Sprintf("  CLI:        %s\n", sess.CLI))
+	if sess.CWD != "" {
+		b.WriteString(fmt.Sprintf("  Directory:  %s\n", sess.CWD))
+	}
+	if sess.Args != "" {
+		b.WriteString(fmt.Sprintf("  Command:    %s\n", sess.Args))
+	}
+	if sess.ParentApp != "" && sess.ParentApp != "unknown" {
+		b.WriteString(fmt.Sprintf("  Terminal:   %s\n", sess.ParentApp))
+	}
+	if sess.StartTime != "" {
+		b.WriteString(fmt.Sprintf("  Started:    %s\n", shortTime(sess.StartTime)))
+	}
 
+	b.WriteString("\n")
+
+	// Session state
+	b.WriteString(fmt.Sprintf("  Status:     %s\n", formatStatus(sess.Status)))
+	b.WriteString(fmt.Sprintf("  Backend:    %s\n", sess.Backend))
+	b.WriteString(fmt.Sprintf("  Target:     %s\n", sess.Target))
+	if sess.PID != "" {
+		b.WriteString(fmt.Sprintf("  PID:        %s\n", sess.PID))
+	}
+	if sess.Policy != "" {
+		b.WriteString(fmt.Sprintf("  Policy:     %s\n", sess.Policy))
+	}
 	if sess.ResumeMessage != "" {
-		b.WriteString(fmt.Sprintf("  Resume:   %q\n", sess.ResumeMessage))
+		b.WriteString(fmt.Sprintf("  Resume:     %q\n", sess.ResumeMessage))
 	}
 
 	// Usage window
@@ -34,24 +54,22 @@ func (m Model) detailView() string {
 		if remaining > 0 {
 			hours := int(remaining.Hours())
 			mins := int(remaining.Minutes()) % 60
-			b.WriteString(fmt.Sprintf("  Window:   %dh%02dm remaining\n", hours, mins))
+			b.WriteString(fmt.Sprintf("  Window:     %dh%02dm remaining\n", hours, mins))
 		} else {
 			w := m.windows.GetWindow(sess.Name)
 			if w != nil {
-				b.WriteString("  Window:   expired\n")
-			} else {
-				b.WriteString("  Window:   not tracked\n")
+				b.WriteString("  Window:     expired\n")
 			}
 		}
 	}
 
 	b.WriteString("\n")
 
-	// Recent output
-	b.WriteString("  ─── Recent Output ─────────────────────────────────────\n")
+	// Recent output (if supported)
+	b.WriteString("  ─── Recent Output ─────────────────────────────────────────\n")
 	output := m.readSessionOutput(sess.Name)
 	if output == "" {
-		b.WriteString("  (no output captured)\n")
+		b.WriteString("  (output capture not available for this terminal)\n")
 	} else {
 		for _, line := range strings.Split(output, "\n") {
 			b.WriteString("  " + line + "\n")
@@ -83,7 +101,7 @@ func (m Model) readSessionOutput(name string) string {
 
 	output, err := inj.ReadOutput(*sess, 15)
 	if err != nil {
-		return "(output capture not supported for this backend)"
+		return ""
 	}
 
 	return output
