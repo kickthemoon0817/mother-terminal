@@ -3,106 +3,248 @@ package tui
 import (
 	"fmt"
 	"strings"
+
+	"github.com/charmbracelet/lipgloss"
+
+	"github.com/kickthemoon0817/mother-terminal/pkg"
 )
+
+// ── Detail view ───────────────────────────────────────────────────────────────
 
 func (m Model) detailView() string {
 	if m.selected == nil {
-		return "No session selected"
+		return "no session selected"
+	}
+
+	w := m.width
+	if w == 0 {
+		w = 100
 	}
 
 	sess := m.selected
-	var b strings.Builder
 
-	b.WriteString("╔══════════════════════════════════════════════════════════════════╗\n")
-	b.WriteString(fmt.Sprintf("║  Session: %-55s ║\n", truncate(sess.Name, 55)))
-	b.WriteString("╚══════════════════════════════════════════════════════════════════╝\n\n")
+	// Header strip
+	header := m.renderDetailHeader(sess, w)
 
-	// Session identity
-	b.WriteString(fmt.Sprintf("  CLI:        %s\n", sess.CLI))
-	if sess.CWD != "" {
-		b.WriteString(fmt.Sprintf("  Directory:  %s\n", sess.CWD))
+	// Two-column metadata panel
+	meta := m.renderMetaPanel(sess, w)
+
+	// Output panel
+	output := m.renderOutputPanel(sess, w)
+
+	// Bottom bar
+	bottom := m.renderDetailBottomBar(w)
+
+	return lipgloss.JoinVertical(lipgloss.Left,
+		header,
+		meta,
+		output,
+		bottom,
+	)
+}
+
+// ── Detail header ─────────────────────────────────────────────────────────────
+
+func (m Model) renderDetailHeader(sess *pkg.Session, w int) string {
+	cliBadge := lipgloss.NewStyle().
+		Foreground(cliColor(sess.CLI)).
+		Bold(true).
+		Render(strings.ToUpper(string(sess.CLI)))
+
+	sep := lipgloss.NewStyle().Foreground(colorBorder).Render("  /  ")
+
+	cwd := shortCWD(sess.CWD)
+	if cwd == "" {
+		cwd = sess.Name
 	}
-	if sess.Args != "" {
-		b.WriteString(fmt.Sprintf("  Command:    %s\n", sess.Args))
+	cwdStyle := lipgloss.NewStyle().Foreground(colorFgBold).Bold(true)
+	cwdStr := cwdStyle.Render(truncate(cwd, w-40))
+
+	statusBadge := renderStatusBadge(sess.Status)
+
+	left := cliBadge + sep + cwdStr
+	right := statusBadge
+
+	// Pad right to align
+	leftWidth := lipgloss.Width(left)
+	rightWidth := lipgloss.Width(right)
+	gap := w - leftWidth - rightWidth - 4
+	if gap < 1 {
+		gap = 1
 	}
-	if sess.ParentApp != "" && sess.ParentApp != "unknown" {
-		b.WriteString(fmt.Sprintf("  Terminal:   %s\n", sess.ParentApp))
-	}
-	if sess.StartTime != "" {
-		b.WriteString(fmt.Sprintf("  Started:    %s\n", shortTime(sess.StartTime)))
+	inner := left + strings.Repeat(" ", gap) + right
+
+	return lipgloss.NewStyle().
+		BorderStyle(lipgloss.ThickBorder()).
+		BorderBottom(true).
+		BorderForeground(colorBorder).
+		Width(w).
+		Padding(0, 1).
+		Render(inner)
+}
+
+// ── Metadata panel ────────────────────────────────────────────────────────────
+
+func (m Model) renderMetaPanel(sess *pkg.Session, w int) string {
+	// Left column: identity
+	idRows := []metaRow{
+		{"CLI", string(sess.CLI), cliColor(sess.CLI)},
+		{"DIRECTORY", sess.CWD, colorFg},
+		{"COMMAND", sess.Args, colorSubtle},
+		{"TERMINAL", sess.ParentApp, colorSubtle},
+		{"STARTED", shortTime(sess.StartTime), colorSubtle},
 	}
 
-	b.WriteString("\n")
-
-	// Session state
-	b.WriteString(fmt.Sprintf("  Status:     %s\n", formatStatus(sess.Status)))
-	b.WriteString(fmt.Sprintf("  Backend:    %s\n", sess.Backend))
-	b.WriteString(fmt.Sprintf("  Target:     %s\n", sess.Target))
-	if sess.PID != "" {
-		b.WriteString(fmt.Sprintf("  PID:        %s\n", sess.PID))
-	}
-	if sess.Policy != "" {
-		b.WriteString(fmt.Sprintf("  Policy:     %s\n", sess.Policy))
-	}
-	if sess.ResumeMessage != "" {
-		b.WriteString(fmt.Sprintf("  Resume:     %q\n", sess.ResumeMessage))
+	// Right column: runtime state
+	policy := string(sess.Policy)
+	if policy == "" {
+		policy = "notify"
 	}
 
-	// Usage window
+	stateRows := []metaRow{
+		{"STATUS", statusLabel(sess.Status), statusColor(sess.Status)},
+		{"BACKEND", string(sess.Backend), colorSubtle},
+		{"TARGET", shortBase(sess.Target), colorSubtle},
+		{"PID", sess.PID, colorSubtle},
+		{"POLICY", policy, colorSubtle},
+	}
+
+	// Window timer row
 	if m.windows != nil {
 		remaining := m.windows.Remaining(sess.Name)
 		if remaining > 0 {
-			hours := int(remaining.Hours())
-			mins := int(remaining.Minutes()) % 60
-			b.WriteString(fmt.Sprintf("  Window:     %dh%02dm remaining\n", hours, mins))
-		} else {
-			w := m.windows.GetWindow(sess.Name)
-			if w != nil {
-				b.WriteString("  Window:     expired\n")
-			}
+			stateRows = append(stateRows, metaRow{"WINDOW", formatDuration(remaining) + " left", colorStalled})
+		} else if w2 := m.windows.GetWindow(sess.Name); w2 != nil {
+			stateRows = append(stateRows, metaRow{"WINDOW", "expired", colorDead})
 		}
 	}
 
-	b.WriteString("\n")
-
-	// Recent output (if supported)
-	b.WriteString("  ─── Recent Output ─────────────────────────────────────────\n")
-	output := m.readSessionOutput(sess.Name)
-	if output == "" {
-		b.WriteString("  (output capture not available for this terminal)\n")
-	} else {
-		for _, line := range strings.Split(output, "\n") {
-			b.WriteString("  " + line + "\n")
-		}
+	// Resume message
+	if sess.ResumeMessage != "" {
+		stateRows = append(stateRows, metaRow{"RESUME", fmt.Sprintf("%q", sess.ResumeMessage), colorSubtle})
 	}
 
-	b.WriteString("\n")
+	halfW := w/2 - 2
+	leftPanel := renderMetaColumn(idRows, halfW)
+	rightPanel := renderMetaColumn(stateRows, halfW)
 
-	// Input bar
-	if m.input.focused {
-		b.WriteString("  Query: " + m.input.value + "█\n")
-	} else {
-		b.WriteString("  [Tab] Input  [Esc] Back  [q] Quit\n")
-	}
+	combined := lipgloss.JoinHorizontal(lipgloss.Top, leftPanel, rightPanel)
 
-	return b.String()
+	return lipgloss.NewStyle().
+		BorderStyle(lipgloss.NormalBorder()).
+		BorderBottom(true).
+		BorderForeground(colorBorder).
+		Width(w).
+		Padding(1, 1).
+		Render(combined)
 }
+
+type metaRow struct {
+	label string
+	value string
+	color lipgloss.Color
+}
+
+func renderMetaColumn(rows []metaRow, w int) string {
+	labelStyle := lipgloss.NewStyle().
+		Foreground(colorMuted).
+		Bold(true).
+		Width(10)
+
+	var lines []string
+	for _, row := range rows {
+		if row.value == "" || row.value == "unknown" {
+			continue
+		}
+		label := labelStyle.Render(row.label)
+		val := lipgloss.NewStyle().
+			Foreground(row.color).
+			Width(w - 11).
+			Render(truncate(row.value, w-11))
+		lines = append(lines, label+" "+val)
+	}
+	if len(lines) == 0 {
+		lines = []string{""}
+	}
+	return lipgloss.NewStyle().Width(w).Render(strings.Join(lines, "\n"))
+}
+
+func statusLabel(status pkg.SessionStatus) string {
+	switch status {
+	case pkg.StatusActive:
+		return "active"
+	case pkg.StatusStalled:
+		return "stalled"
+	case pkg.StatusDead:
+		return "dead"
+	case pkg.StatusDiscovered:
+		return "discovered"
+	default:
+		return string(status)
+	}
+}
+
+// ── Output panel ──────────────────────────────────────────────────────────────
+
+func (m Model) renderOutputPanel(sess *pkg.Session, w int) string {
+	titleStyle := lipgloss.NewStyle().
+		Foreground(colorSubtle).
+		Bold(true)
+
+	title := titleStyle.Render("RECENT OUTPUT")
+
+	output := m.readSessionOutput(sess.Name)
+
+	var content string
+	if output == "" {
+		content = lipgloss.NewStyle().
+			Foreground(colorMuted).
+			Italic(true).
+			Render("output capture not available for this terminal")
+	} else {
+		lines := strings.Split(strings.TrimRight(output, "\n"), "\n")
+		var styled []string
+		for _, line := range lines {
+			styled = append(styled, lipgloss.NewStyle().Foreground(colorFg).Render(line))
+		}
+		content = strings.Join(styled, "\n")
+	}
+
+	inner := title + "\n" + strings.Repeat("─", lipgloss.Width(title)+20) + "\n" + content
+
+	return lipgloss.NewStyle().
+		Padding(1, 1).
+		Width(w).
+		Render(inner)
+}
+
+// ── Bottom bar ────────────────────────────────────────────────────────────────
+
+func (m Model) renderDetailBottomBar(w int) string {
+	if m.input.focused {
+		return renderInputBar(m.input.value, w)
+	}
+	return renderHelpBar([]helpItem{
+		{"esc", "back"},
+		{"tab", "query"},
+		{"q", "quit"},
+	}, w)
+}
+
+// ── Session output reader ─────────────────────────────────────────────────────
 
 func (m Model) readSessionOutput(name string) string {
 	sess, err := m.manager.Get(name)
 	if err != nil {
 		return ""
 	}
-
 	inj, err := m.registry.Get(sess.Backend)
 	if err != nil {
 		return ""
 	}
-
 	output, err := inj.ReadOutput(*sess, 15)
 	if err != nil {
 		return ""
 	}
-
 	return output
 }

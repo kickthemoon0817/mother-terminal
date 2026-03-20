@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/kickthemoon0817/mother-terminal/internal/backend"
 	"github.com/kickthemoon0817/mother-terminal/internal/scheduler"
@@ -18,6 +19,71 @@ const (
 	viewDashboard viewMode = iota
 	viewDetail
 )
+
+// ── Palette ──────────────────────────────────────────────────────────────────
+
+var (
+	// Base chrome
+	colorBorder = lipgloss.Color("#3a3a3a")
+	colorMuted   = lipgloss.Color("#5a5a5a")
+	colorSubtle  = lipgloss.Color("#888888")
+	colorFg      = lipgloss.Color("#d4d4d4")
+	colorFgBold  = lipgloss.Color("#f0f0f0")
+
+	// Status
+	colorActive     = lipgloss.Color("#4ade80") // green-400
+	colorStalled    = lipgloss.Color("#facc15") // yellow-400
+	colorDead       = lipgloss.Color("#f87171") // red-400
+	colorDiscovered = lipgloss.Color("#60a5fa") // blue-400
+
+	// CLI type accents
+	colorClaude   = lipgloss.Color("#a78bfa") // violet-400
+	colorCodex    = lipgloss.Color("#34d399") // emerald-400
+	colorGemini   = lipgloss.Color("#fb923c") // orange-400
+	colorOpenCode = lipgloss.Color("#38bdf8") // sky-400
+
+	// Highlights
+	colorSelection = lipgloss.Color("#2d3748") // dark blue-gray
+	colorInputBg   = lipgloss.Color("#1e2433")
+	colorInputFg   = lipgloss.Color("#93c5fd")
+)
+
+// ── Shared style primitives ───────────────────────────────────────────────────
+// Styles are created inline where used to avoid unused variable warnings.
+
+// cliColor returns the accent color for a CLI type.
+func cliColor(cli pkg.CLIType) lipgloss.Color {
+	switch cli {
+	case pkg.CLIClaude:
+		return colorClaude
+	case pkg.CLICodex:
+		return colorCodex
+	case pkg.CLIGemini:
+		return colorGemini
+	case pkg.CLIOpenCode:
+		return colorOpenCode
+	default:
+		return colorSubtle
+	}
+}
+
+// statusColor returns the color for a session status.
+func statusColor(status pkg.SessionStatus) lipgloss.Color {
+	switch status {
+	case pkg.StatusActive:
+		return colorActive
+	case pkg.StatusStalled:
+		return colorStalled
+	case pkg.StatusDead:
+		return colorDead
+	case pkg.StatusDiscovered:
+		return colorDiscovered
+	default:
+		return colorMuted
+	}
+}
+
+// ── Model ────────────────────────────────────────────────────────────────────
 
 // Model is the root bubbletea model for Mother Terminal.
 type Model struct {
@@ -53,6 +119,8 @@ func NewModel(
 	}
 }
 
+// ── Messages ─────────────────────────────────────────────────────────────────
+
 // refreshMsg triggers a session list refresh.
 type refreshMsg struct{}
 
@@ -60,6 +128,8 @@ type refreshMsg struct{}
 type monitorEventMsg struct {
 	event session.Event
 }
+
+// ── Lifecycle ─────────────────────────────────────────────────────────────────
 
 func (m Model) Init() tea.Cmd {
 	return tea.Batch(
@@ -91,7 +161,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tickCmd()
 	}
 
-	// Update input model
+	// Delegate to input model when focused
 	if m.input.focused {
 		var cmd tea.Cmd
 		m.input, cmd = m.input.Update(msg)
@@ -104,7 +174,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
 
-	// Global keys
+	// Global quit
 	switch key {
 	case "ctrl+c", "q":
 		if !m.input.focused {
@@ -171,9 +241,11 @@ func (m Model) View() string {
 	case viewDetail:
 		return m.detailView()
 	default:
-		return "Unknown view"
+		return "unknown view"
 	}
 }
+
+// ── Commands ──────────────────────────────────────────────────────────────────
 
 func (m Model) refreshSessions() tea.Cmd {
 	return func() tea.Msg {
@@ -206,9 +278,11 @@ func (m Model) sendQuery(sess *pkg.Session, query string) tea.Cmd {
 	}
 }
 
+// ── Run ───────────────────────────────────────────────────────────────────────
+
 // Run starts the TUI application.
 func Run(model Model) error {
-	p := tea.NewProgram(model)
+	p := tea.NewProgram(model, tea.WithAltScreen())
 	_, err := p.Run()
 	if err != nil {
 		return fmt.Errorf("TUI error: %w", err)
