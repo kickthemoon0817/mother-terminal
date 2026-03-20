@@ -12,7 +12,8 @@ import (
 	"github.com/kickthemoon0817/mother-terminal/pkg"
 )
 
-// Backend implements the Injector interface for macOS native terminals.
+// Backend implements the Injector interface for macOS.
+// Uses process scanning + TTY identification for universal terminal support.
 type Backend struct{}
 
 func (b *Backend) Name() pkg.BackendType {
@@ -20,177 +21,200 @@ func (b *Backend) Name() pkg.BackendType {
 }
 
 func (b *Backend) IsAvailable() bool {
-	_, err := exec.LookPath("osascript")
-	return err == nil
+	// Available on any macOS — uses ps + direct TTY write
+	return true
+}
+
+// discoveredProcess holds a process with its TTY and parent app info.
+type discoveredProcess struct {
+	PID       string
+	TTY       string
+	CLI       pkg.CLIType
+	Command   string
+	ParentApp string
 }
 
 func (b *Backend) Discover() ([]pkg.Session, error) {
-	// Query Terminal.app and iTerm2 for open windows/tabs
+	// Scan for AI CLI processes with their TTYs
+	procs, err := b.scanProcesses()
+	if err != nil || len(procs) == 0 {
+		return nil, nil
+	}
+
 	var sessions []pkg.Session
+	seen := make(map[string]bool) // dedupe by TTY
 
-	termSessions, _ := b.discoverTerminalApp()
-	sessions = append(sessions, termSessions...)
+	for _, p := range procs {
+		if p.TTY == "" || p.TTY == "??" || seen[p.TTY] {
+			continue
+		}
+		seen[p.TTY] = true
 
-	itermSessions, _ := b.discoverITerm2()
-	sessions = append(sessions, itermSessions...)
+		// Verify the TTY device exists and is writable
+		ttyPath := "/dev/" + p.TTY
+		if _, err := os.Stat(ttyPath); err != nil {
+			continue
+		}
+
+		sessions = append(sessions, pkg.Session{
+			ID:      fmt.Sprintf("macos-%s-%s", p.CLI, p.PID),
+			Name:    fmt.Sprintf("%s-%s", p.CLI, p.TTY),
+			CLI:     p.CLI,
+			Backend: pkg.BackendMacOS,
+			Target:  ttyPath, // e.g., /dev/ttys001
+			Status:  pkg.StatusDiscovered,
+			Policy:  pkg.PolicyNotify,
+		})
+	}
 
 	return sessions, nil
 }
 
-func (b *Backend) discoverTerminalApp() ([]pkg.Session, error) {
-	script := `tell application "System Events" to return (name of every process whose name is "Terminal")`
-	out, err := exec.Command("osascript", "-e", script).Output()
-	if err != nil || strings.TrimSpace(string(out)) == "" {
-		return nil, nil
-	}
-
-	// Get Terminal.app window/tab info
-	script = `tell application "Terminal"
-		set result to ""
-		repeat with w from 1 to count of windows
-			repeat with t from 1 to count of tabs of window w
-				set proc to processes of tab t of window w
-				set result to result & w & ":" & t & " " & (item 1 of proc) & linefeed
-			end repeat
-		end repeat
-		return result
-	end tell`
-
-	out, err = exec.Command("osascript", "-e", script).Output()
+// scanProcesses finds AI CLI processes with their TTY and parent app.
+func (b *Backend) scanProcesses() ([]discoveredProcess, error) {
+	out, err := exec.Command("ps", "-eo", "pid,tty,ppid,comm").Output()
 	if err != nil {
-		return nil, nil
+		return nil, err
 	}
 
-	return b.parseDiscoveredSessions(string(out), "Terminal"), nil
-}
-
-func (b *Backend) discoverITerm2() ([]pkg.Session, error) {
-	script := `tell application "System Events" to return (name of every process whose name is "iTerm2")`
-	out, err := exec.Command("osascript", "-e", script).Output()
-	if err != nil || strings.TrimSpace(string(out)) == "" {
-		return nil, nil
-	}
-
-	script = `tell application "iTerm2"
-		set result to ""
-		repeat with w from 1 to count of windows
-			repeat with t from 1 to count of tabs of window w
-				repeat with s from 1 to count of sessions of tab t of window w
-					set proc to name of current session of tab t of window w
-					set result to result & w & ":" & t & ":" & s & " " & proc & linefeed
-				end repeat
-			end repeat
-		end repeat
-		return result
-	end tell`
-
-	out, err = exec.Command("osascript", "-e", script).Output()
-	if err != nil {
-		return nil, nil
-	}
-
-	return b.parseDiscoveredSessions(string(out), "iTerm2"), nil
-}
-
-func (b *Backend) parseDiscoveredSessions(output, app string) []pkg.Session {
-	var sessions []pkg.Session
-	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
-		if line == "" {
+	// Build PID -> comm map for parent lookup
+	pidComm := make(map[string]string)
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 4 {
 			continue
 		}
-		parts := strings.SplitN(line, " ", 2)
-		if len(parts) < 2 {
+		pidComm[fields[0]] = fields[3]
+	}
+
+	var procs []discoveredProcess
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 4 {
 			continue
 		}
-		tabID := parts[0]
-		proc := parts[1]
+		pid := fields[0]
+		tty := fields[1]
+		ppid := fields[2]
+		comm := fields[3]
+
+		// Get base command name
+		parts := strings.Split(comm, "/")
+		baseName := strings.ToLower(parts[len(parts)-1])
 
 		for name, cliType := range pkg.KnownCLIs {
-			if strings.Contains(strings.ToLower(proc), name) {
-				target := fmt.Sprintf("%s:%s", app, tabID)
-				sessions = append(sessions, pkg.Session{
-					ID:      fmt.Sprintf("macos-%s-%s", app, tabID),
-					Name:    fmt.Sprintf("%s-%s-%s", name, app, tabID),
-					CLI:     cliType,
-					Backend: pkg.BackendMacOS,
-					Target:  target,
-					Status:  pkg.StatusDiscovered,
-					Policy:  pkg.PolicyNotify,
+			if baseName == name {
+				// Trace parent to find terminal app
+				parentApp := b.traceParentApp(ppid, pidComm)
+
+				procs = append(procs, discoveredProcess{
+					PID:       pid,
+					TTY:       tty,
+					CLI:       cliType,
+					Command:   comm,
+					ParentApp: parentApp,
 				})
 				break
 			}
 		}
 	}
-	return sessions
+
+	return procs, nil
+}
+
+// traceParentApp walks up the process tree to find the terminal app.
+func (b *Backend) traceParentApp(ppid string, pidComm map[string]string) string {
+	visited := make(map[string]bool)
+	current := ppid
+
+	for i := 0; i < 10; i++ { // max depth to prevent infinite loops
+		if current == "" || current == "0" || current == "1" || visited[current] {
+			break
+		}
+		visited[current] = true
+
+		comm, ok := pidComm[current]
+		if !ok {
+			break
+		}
+
+		lower := strings.ToLower(comm)
+		switch {
+		case strings.Contains(lower, "visual studio code") || strings.Contains(lower, "code helper"):
+			return "VS Code"
+		case strings.Contains(lower, "iterm2"):
+			return "iTerm2"
+		case strings.Contains(lower, "terminal"):
+			return "Terminal.app"
+		case strings.Contains(lower, "warp"):
+			return "Warp"
+		case strings.Contains(lower, "kitty"):
+			return "Kitty"
+		case strings.Contains(lower, "alacritty"):
+			return "Alacritty"
+		case strings.Contains(lower, "wezterm"):
+			return "WezTerm"
+		}
+
+		// Get parent's parent
+		ppOut, err := exec.Command("ps", "-o", "ppid=", "-p", current).Output()
+		if err != nil {
+			break
+		}
+		current = strings.TrimSpace(string(ppOut))
+	}
+
+	return "unknown"
 }
 
 func (b *Backend) SendKeys(session pkg.Session, text string) error {
-	parts := strings.SplitN(session.Target, ":", 2)
-	if len(parts) < 2 {
-		return fmt.Errorf("%w: invalid macos target format %q", pkg.ErrSendKeysFailed, session.Target)
+	ttyPath := session.Target
+	if !strings.HasPrefix(ttyPath, "/dev/") {
+		return fmt.Errorf("%w: invalid TTY target %q", pkg.ErrSendKeysFailed, ttyPath)
 	}
-	app := parts[0]
 
-	// Write text to a temp file to avoid AppleScript injection.
-	// Never interpolate user text into AppleScript string literals.
-	tmpFile, err := os.CreateTemp("", "mother-input-*")
+	// Write directly to the TTY device — this appears as keyboard input
+	// to the process. Works for ANY terminal app (VS Code, iTerm2, Terminal, Warp, etc.)
+	f, err := os.OpenFile(ttyPath, os.O_WRONLY, 0)
 	if err != nil {
-		return fmt.Errorf("%w: failed to create temp file: %v", pkg.ErrSendKeysFailed, err)
+		return fmt.Errorf("%w: cannot open TTY %s: %v", pkg.ErrSendKeysFailed, ttyPath, err)
 	}
-	defer os.Remove(tmpFile.Name())
+	defer f.Close()
 
-	if _, err := tmpFile.WriteString(text + "\n"); err != nil {
-		tmpFile.Close()
-		return fmt.Errorf("%w: failed to write temp file: %v", pkg.ErrSendKeysFailed, err)
+	_, err = f.WriteString(text + "\n")
+	if err != nil {
+		return fmt.Errorf("%w: write to TTY %s: %v", pkg.ErrSendKeysFailed, ttyPath, err)
 	}
-	tmpFile.Close()
 
-	// Use keystroke-based injection via System Events to type into the
-	// frontmost window of the target app. This avoids `do script` which
-	// opens a new shell, and avoids interpolating text into AppleScript.
-	script := fmt.Sprintf(`
-		set inputText to (read POSIX file %q)
-		-- Remove trailing newline from file read
-		if inputText ends with linefeed then
-			set inputText to text 1 thru -2 of inputText
-		end if
-		tell application %q to activate
-		delay 0.3
-		tell application "System Events"
-			keystroke inputText
-			keystroke return
-		end tell
-	`, tmpFile.Name(), app)
-
-	if err := exec.Command("osascript", "-e", script).Run(); err != nil {
-		return fmt.Errorf("%w: osascript send to %s: %v", pkg.ErrSendKeysFailed, session.Target, err)
-	}
 	return nil
 }
 
 func (b *Backend) ReadOutput(session pkg.Session, lines int) (string, error) {
-	parts := strings.SplitN(session.Target, ":", 2)
-	if len(parts) < 2 {
-		return "", fmt.Errorf("%w: invalid macos target format", pkg.ErrReadOutputFailed)
-	}
-	app := parts[0]
+	// Try to read recent output via the log file if available,
+	// or fall back to reading the TTY scrollback where possible.
+	// Direct TTY reading is not reliably supported — the TTY device
+	// is write-only from our perspective.
+
+	// Attempt AppleScript-based reading for Terminal.app and iTerm2
+	// by checking which app owns the session
+	ttyPath := session.Target
+	app := b.detectAppForTTY(ttyPath)
 
 	var script string
 	switch app {
-	case "Terminal":
+	case "Terminal.app":
 		script = `tell application "Terminal" to return contents of front window`
 	case "iTerm2":
 		script = `tell application "iTerm2" to tell current session of current tab of current window to return contents`
 	default:
-		return "", fmt.Errorf("%w: unsupported app %q", pkg.ErrReadOutputFailed, app)
+		return "", fmt.Errorf("%w: output capture not supported for %s terminals — use tmux for output reading", pkg.ErrReadOutputFailed, app)
 	}
 
 	out, err := exec.Command("osascript", "-e", script).Output()
 	if err != nil {
-		return "", fmt.Errorf("%w: osascript read from %s: %v", pkg.ErrReadOutputFailed, app, err)
+		return "", fmt.Errorf("%w: osascript read: %v", pkg.ErrReadOutputFailed, err)
 	}
 
-	// Trim to requested line count
 	content := string(out)
 	if lines > 0 {
 		allLines := strings.Split(content, "\n")
@@ -203,24 +227,58 @@ func (b *Backend) ReadOutput(session pkg.Session, lines int) (string, error) {
 	return content, nil
 }
 
+// detectAppForTTY identifies which terminal app owns a TTY.
+func (b *Backend) detectAppForTTY(ttyPath string) string {
+	ttyName := strings.TrimPrefix(ttyPath, "/dev/")
+
+	// Find the shell process on this TTY
+	out, err := exec.Command("ps", "-eo", "pid,tty,ppid").Output()
+	if err != nil {
+		return "unknown"
+	}
+
+	pidComm := make(map[string]string)
+	commOut, _ := exec.Command("ps", "-eo", "pid,comm").Output()
+	for _, line := range strings.Split(string(commOut), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 2 {
+			pidComm[fields[0]] = strings.Join(fields[1:], " ")
+		}
+	}
+
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 3 {
+			continue
+		}
+		if fields[1] == ttyName {
+			return b.traceParentApp(fields[2], pidComm)
+		}
+	}
+
+	return "unknown"
+}
+
 func (b *Backend) Ping(session pkg.Session) (pkg.PingResult, error) {
 	start := time.Now()
 
-	// Check if the app process is running
-	parts := strings.SplitN(session.Target, ":", 2)
-	if len(parts) < 2 {
+	ttyPath := session.Target
+	if !strings.HasPrefix(ttyPath, "/dev/") {
 		return pkg.PingResult{}, nil
 	}
-	app := parts[0]
 
-	script := fmt.Sprintf(`tell application "System Events" to return (name of every process whose name is %q)`, app)
-	out, err := exec.Command("osascript", "-e", script).Output()
-	alive := err == nil && strings.TrimSpace(string(out)) != ""
+	// Check if the TTY device still exists
+	info, err := os.Stat(ttyPath)
+	alive := err == nil && info.Mode()&os.ModeCharDevice != 0
 
+	// Check if we can open the TTY for writing (responsive)
 	responsive := false
 	if alive {
-		_, err := b.ReadOutput(session, 1)
-		responsive = err == nil
+		f, err := os.OpenFile(ttyPath, os.O_WRONLY, 0)
+		if err == nil {
+			responsive = true
+			f.Close()
+		}
 	}
 
 	return pkg.PingResult{
