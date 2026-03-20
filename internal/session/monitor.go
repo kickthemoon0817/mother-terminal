@@ -32,6 +32,7 @@ type Monitor struct {
 	manager  *Manager
 	registry *backend.Registry
 	events   chan Event
+	done     chan struct{}
 	watchers map[string]chan struct{}
 	defaults MonitorDefaults
 }
@@ -59,6 +60,7 @@ func NewMonitor(manager *Manager, registry *backend.Registry, defaults MonitorDe
 		manager:  manager,
 		registry: registry,
 		events:   make(chan Event, 100),
+		done:     make(chan struct{}),
 		watchers: make(map[string]chan struct{}),
 		defaults: defaults,
 	}
@@ -67,6 +69,11 @@ func NewMonitor(manager *Manager, registry *backend.Registry, defaults MonitorDe
 // Events returns the event channel.
 func (m *Monitor) Events() <-chan Event {
 	return m.events
+}
+
+// Done returns a channel that is closed when the monitor is stopped.
+func (m *Monitor) Done() <-chan struct{} {
+	return m.done
 }
 
 // Watch starts monitoring a session for stalls.
@@ -93,13 +100,27 @@ func (m *Monitor) Unwatch(sessionName string) {
 	}
 }
 
-// UnwatchAll stops monitoring all sessions.
+// UnwatchAll stops monitoring all sessions and signals done.
 func (m *Monitor) UnwatchAll() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for name, stop := range m.watchers {
 		close(stop)
 		delete(m.watchers, name)
+	}
+	select {
+	case <-m.done:
+		// already closed
+	default:
+		close(m.done)
+	}
+}
+
+// emit sends an event without blocking. Drops the event if the channel is full.
+func (m *Monitor) emit(event Event) {
+	select {
+	case m.events <- event:
+	default:
 	}
 }
 
@@ -150,12 +171,12 @@ func (m *Monitor) watchLoop(sessionName string, stop chan struct{}) {
 					stalled = true
 					m.manager.UpdateStatus(sessionName, pkg.StatusStalled)
 
-					m.events <- Event{
+					m.emit(Event{
 						SessionName: sessionName,
 						Type:        EventStalled,
 						Message:     "session output unchanged, marking as stalled",
 						Timestamp:   time.Now(),
-					}
+					})
 
 					// Apply stall policy
 					m.applyPolicy(sess, inj)
@@ -167,12 +188,12 @@ func (m *Monitor) watchLoop(sessionName string, stop chan struct{}) {
 				if stalled {
 					stalled = false
 					m.manager.UpdateStatus(sessionName, pkg.StatusActive)
-					m.events <- Event{
+					m.emit(Event{
 						SessionName: sessionName,
 						Type:        EventResumed,
 						Message:     "session output changed, marking as active",
 						Timestamp:   time.Now(),
-					}
+					})
 				}
 			}
 		}
@@ -192,12 +213,12 @@ func (m *Monitor) applyPolicy(sess *pkg.Session, inj backend.Injector) {
 			msg = m.defaults.ResumeMessage
 		}
 		if err := inj.SendKeys(*sess, msg); err == nil {
-			m.events <- Event{
+			m.emit(Event{
 				SessionName: sess.Name,
 				Type:        EventRecovery,
 				Message:     "auto-resume sent: " + msg,
 				Timestamp:   time.Now(),
-			}
+			})
 		}
 	case pkg.PolicyNotify:
 		// Event already emitted above

@@ -186,8 +186,12 @@ func (m Model) listenMonitorEvents() tea.Cmd {
 		return nil
 	}
 	return func() tea.Msg {
-		event := <-m.monitor.Events()
-		return monitorEventMsg{event: event}
+		select {
+		case event := <-m.monitor.Events():
+			return monitorEventMsg{event: event}
+		case <-m.monitor.Done():
+			return nil
+		}
 	}
 }
 
