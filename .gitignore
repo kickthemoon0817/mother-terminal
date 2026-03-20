@@ -1,6 +1,6 @@
 # Binaries (root-level only, not cmd/ source dirs)
-/mother
-/motherctl
+/mtt
+/mttctl
 *.exe
 *.dll
 *.so

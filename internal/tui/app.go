@@ -174,11 +174,32 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
 
-	// Global quit
-	switch key {
-	case "ctrl+c", "q":
-		if !m.input.focused {
+	// Global quit (only when input not focused)
+	if !m.input.focused {
+		switch key {
+		case "ctrl+c", "q":
 			return m, tea.Quit
+		}
+	} else {
+		// When input is focused, only handle control keys here.
+		// All other keys go to the InputModel for character capture.
+		switch key {
+		case "ctrl+c":
+			return m, tea.Quit
+		case "escape":
+			m.input.focused = false
+			m.input.value = ""
+			return m, nil
+		case "tab":
+			m.input.focused = false
+			return m, nil
+		case "enter":
+			return m.handleInputSubmit()
+		default:
+			// Pass to InputModel for character handling
+			var cmd tea.Cmd
+			m.input, cmd = m.input.Update(msg)
+			return m, cmd
 		}
 	}
 
@@ -187,6 +208,59 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleDashboardKey(key)
 	case viewDetail:
 		return m.handleDetailKey(key)
+	}
+
+	return m, nil
+}
+
+func (m Model) handleInputSubmit() (tea.Model, tea.Cmd) {
+	value := m.input.value
+	m.input.value = ""
+
+	if value == "" {
+		return m, nil
+	}
+
+	// Slash commands
+	switch {
+	case value == "/quit" || value == "/q":
+		return m, tea.Quit
+
+	case value == "/back" || value == "/b":
+		if m.mode == viewDetail {
+			m.mode = viewDashboard
+			m.selected = nil
+		}
+		m.input.focused = false
+		return m, nil
+
+	case value == "/refresh" || value == "/r":
+		m.sessions = m.manager.List()
+		return m, nil
+
+	case value == "/sessions" || value == "/ls":
+		m.mode = viewDashboard
+		m.selected = nil
+		m.sessions = m.manager.List()
+		return m, nil
+
+	case value == "/help" || value == "/h":
+		// Stay in current view, help is shown in the help bar
+		return m, nil
+
+	default:
+		// If in detail view with a selected session, send as query
+		if m.selected != nil {
+			return m, m.sendQuery(m.selected, value)
+		}
+
+		// If in dashboard, select the session under cursor and send
+		if len(m.sessions) > 0 && m.cursor < len(m.sessions) {
+			s := m.sessions[m.cursor]
+			m.selected = &s
+			m.mode = viewDetail
+			return m, m.sendQuery(m.selected, value)
+		}
 	}
 
 	return m, nil
@@ -208,8 +282,8 @@ func (m Model) handleDashboardKey(key string) (tea.Model, tea.Cmd) {
 			m.selected = &s
 			m.mode = viewDetail
 		}
-	case "tab":
-		m.input.focused = !m.input.focused
+	case "/", "tab":
+		m.input.focused = true
 	case "r":
 		m.sessions = m.manager.List()
 	}
@@ -221,15 +295,8 @@ func (m Model) handleDetailKey(key string) (tea.Model, tea.Cmd) {
 	case "escape":
 		m.mode = viewDashboard
 		m.selected = nil
-		m.input.focused = false
-	case "tab":
-		m.input.focused = !m.input.focused
-	case "enter":
-		if m.input.focused && m.input.value != "" && m.selected != nil {
-			query := m.input.value
-			m.input.value = ""
-			return m, m.sendQuery(m.selected, query)
-		}
+	case "/", "tab":
+		m.input.focused = true
 	}
 	return m, nil
 }
@@ -282,7 +349,8 @@ func (m Model) sendQuery(sess *pkg.Session, query string) tea.Cmd {
 
 // Run starts the TUI application.
 func Run(model Model) error {
-	p := tea.NewProgram(model, tea.WithAltScreen())
+	p := tea.NewProgram(model)
+
 	_, err := p.Run()
 	if err != nil {
 		return fmt.Errorf("TUI error: %w", err)

@@ -60,7 +60,7 @@ func renderHeader(w int) string {
 	title := lipgloss.NewStyle().
 		Foreground(colorFgBold).
 		Bold(true).
-		Render("MOTHER TERMINAL")
+		Render("MTT")
 
 	subtitle := lipgloss.NewStyle().
 		Foreground(colorMuted).
@@ -291,8 +291,8 @@ func (m Model) renderBottomBar(w int) string {
 	return renderHelpBar([]helpItem{
 		{"↑↓/jk", "navigate"},
 		{"enter", "detail"},
+		{"/", "command"},
 		{"r", "refresh"},
-		{"tab", "query"},
 		{"q", "quit"},
 	}, w)
 }
