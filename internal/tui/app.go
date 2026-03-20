@@ -2,7 +2,9 @@ package tui
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -99,12 +101,13 @@ type Model struct {
 	recorder *history.Recorder
 	remotes  *remote.Client
 
-	mode     viewMode
-	cursor   int
-	sessions []pkg.Session
-	selected *pkg.Session
-	input    InputModel
-	message  string // status message displayed briefly
+	mode         viewMode
+	cursor       int
+	sessions     []pkg.Session
+	selected     *pkg.Session
+	input        InputModel
+	message      string // status message displayed briefly
+	pendingSpawn string // CLI name waiting for directory input
 	width    int
 	height   int
 	err      error
@@ -207,56 +210,52 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// Delegate to input model when focused
-	if m.input.focused {
-		var cmd tea.Cmd
-		m.input, cmd = m.input.Update(msg)
-		return m, cmd
-	}
-
 	return m, nil
 }
 
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
 
-	// Global quit
-	if !m.input.focused {
-		switch key {
-		case "ctrl+c":
-			return m, tea.Quit
+	switch key {
+	case "ctrl+c":
+		return m, tea.Quit
+	case "esc":
+		if m.mode == viewDetail {
+			m.mode = viewDashboard
+			m.selected = nil
 		}
-	} else {
-		// When input is focused, only handle control keys here.
-		// All other keys go to the InputModel for character capture.
-		switch key {
-		case "ctrl+c":
-			return m, tea.Quit
-		case "esc":
-			m.input.focused = false
-			m.input.value = ""
-			return m, nil
-		case "tab":
-			m.input.focused = false
-			return m, nil
-		case "enter":
+		m.input.value = ""
+		m.pendingSpawn = ""
+		m.input.dirMode = false
+		m.message = ""
+		return m, nil
+	case "up":
+		if m.cursor > 0 {
+			m.cursor--
+		}
+		return m, nil
+	case "down":
+		if m.cursor < len(m.sessions)-1 {
+			m.cursor++
+		}
+		return m, nil
+	case "enter":
+		if m.input.value != "" {
 			return m.handleInputSubmit()
-		default:
-			// Pass to InputModel for character handling
-			var cmd tea.Cmd
-			m.input, cmd = m.input.Update(msg)
-			return m, cmd
 		}
+		// No input — select session
+		if m.mode == viewDashboard && len(m.sessions) > 0 && m.cursor < len(m.sessions) {
+			s := m.sessions[m.cursor]
+			m.selected = &s
+			m.mode = viewDetail
+		}
+		return m, nil
+	default:
+		// All other keys go to the input bar
+		var cmd tea.Cmd
+		m.input, cmd = m.input.Update(msg)
+		return m, cmd
 	}
-
-	switch m.mode {
-	case viewDashboard:
-		return m.handleDashboardKey(key)
-	case viewDetail:
-		return m.handleDetailKey(key)
-	}
-
-	return m, nil
 }
 
 func (m Model) handleInputSubmit() (tea.Model, tea.Cmd) {
@@ -264,7 +263,24 @@ func (m Model) handleInputSubmit() (tea.Model, tea.Cmd) {
 	m.input.value = ""
 
 	if value == "" {
+		if m.pendingSpawn != "" {
+			// Empty directory = use current directory
+			cli := m.pendingSpawn
+			m.pendingSpawn = ""
+			m.input.dirMode = false
+			m.message = ""
+			return m, m.spawnSession(cli + " .")
+		}
 		return m, nil
+	}
+
+	// If we're waiting for a directory for /spawn
+	if m.pendingSpawn != "" {
+		cli := m.pendingSpawn
+		m.pendingSpawn = ""
+		m.input.dirMode = false
+		m.message = ""
+		return m, m.spawnSession(cli + " " + value)
 	}
 
 	// Slash commands
@@ -295,16 +311,24 @@ func (m Model) handleInputSubmit() (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case strings.HasPrefix(value, "/spawn "):
-		// /spawn claude — start a new AI CLI session in a tmux pane
-		// /spawn claude --remote myserver
 		args := strings.TrimSpace(strings.TrimPrefix(value, "/spawn"))
+		// /spawn claude --remote myserver — immediate remote spawn
 		if strings.Contains(args, "--remote ") {
 			parts := strings.SplitN(args, "--remote ", 2)
 			cliName := strings.TrimSpace(parts[0])
 			hostName := strings.TrimSpace(parts[1])
 			return m, m.spawnRemoteSession(cliName, hostName)
 		}
-		return m, m.spawnSession(args)
+		// /spawn claude — prompt for directory
+		cliName := strings.ToLower(strings.Fields(args)[0])
+		if _, ok := pkg.KnownCLIs[cliName]; !ok {
+			m.message = fmt.Sprintf("unknown CLI %q — use: claude, codex, gemini, opencode", cliName)
+			return m, nil
+		}
+		m.pendingSpawn = cliName
+		m.input.dirMode = true
+		m.message = fmt.Sprintf("spawn %s — enter directory (or Enter for current):", cliName)
+		return m, nil
 
 	case strings.HasPrefix(value, "/history"):
 		// /history — show history for selected session
@@ -382,38 +406,6 @@ func (m Model) handleInputSubmit() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m Model) handleDashboardKey(key string) (tea.Model, tea.Cmd) {
-	switch key {
-	case "up":
-		if m.cursor > 0 {
-			m.cursor--
-		}
-	case "down":
-		if m.cursor < len(m.sessions)-1 {
-			m.cursor++
-		}
-	case "enter":
-		if len(m.sessions) > 0 && m.cursor < len(m.sessions) {
-			s := m.sessions[m.cursor]
-			m.selected = &s
-			m.mode = viewDetail
-		}
-	case "/", "ㅗ", "tab":
-		m.input.focused = true
-	}
-	return m, nil
-}
-
-func (m Model) handleDetailKey(key string) (tea.Model, tea.Cmd) {
-	switch key {
-	case "esc":
-		m.mode = viewDashboard
-		m.selected = nil
-	case "/", "ㅗ", "tab":
-		m.input.focused = true
-	}
-	return m, nil
-}
 
 func (m Model) View() string {
 	switch m.mode {
@@ -465,19 +457,40 @@ type spawnMsg struct {
 	err     error
 }
 
-func (m Model) spawnSession(cliName string) tea.Cmd {
+func (m Model) spawnSession(args string) tea.Cmd {
 	return func() tea.Msg {
-		// Validate CLI name
-		cliName = strings.ToLower(strings.TrimSpace(cliName))
+		// Parse: /spawn claude [directory]
+		parts := strings.Fields(args)
+		if len(parts) == 0 {
+			return spawnMsg{err: fmt.Errorf("usage: /spawn <cli> [directory]")}
+		}
+
+		cliName := strings.ToLower(parts[0])
 		if _, ok := pkg.KnownCLIs[cliName]; !ok {
 			return spawnMsg{err: fmt.Errorf("unknown CLI %q — use: claude, codex, gemini, opencode", cliName)}
+		}
+
+		// Resolve working directory
+		dir := ""
+		if len(parts) > 1 {
+			dir = strings.Join(parts[1:], " ")
+			// Expand ~
+			if strings.HasPrefix(dir, "~/") {
+				home, _ := os.UserHomeDir()
+				dir = filepath.Join(home, dir[2:])
+			}
 		}
 
 		// Create a unique tmux session name
 		sessionName := fmt.Sprintf("mtt-%s-%d", cliName, time.Now().Unix())
 
-		// Spawn in tmux
-		cmd := exec.Command("tmux", "new-session", "-d", "-s", sessionName, cliName)
+		// Spawn in tmux with optional directory
+		tmuxArgs := []string{"new-session", "-d", "-s", sessionName}
+		if dir != "" {
+			tmuxArgs = append(tmuxArgs, "-c", dir)
+		}
+		tmuxArgs = append(tmuxArgs, cliName)
+		cmd := exec.Command("tmux", tmuxArgs...)
 		if err := cmd.Run(); err != nil {
 			return spawnMsg{err: fmt.Errorf("failed to spawn %s in tmux: %v", cliName, err)}
 		}
@@ -492,15 +505,23 @@ func (m Model) spawnSession(cliName string) tea.Cmd {
 		}
 		panePID := strings.TrimSpace(string(out))
 
+		// Resolve display name from directory
+		displayDir := dir
+		if displayDir == "" {
+			displayDir, _ = os.Getwd()
+		}
+
 		sess := &pkg.Session{
 			ID:        fmt.Sprintf("tmux-%s-%s", cliName, sessionName),
-			Name:      fmt.Sprintf("%s [%s]", cliName, sessionName),
+			Name:      fmt.Sprintf("%s@%s", cliName, sessionName),
 			CLI:       pkg.CLIType(cliName),
 			Backend:   pkg.BackendTmux,
 			Target:    sessionName + ":0.0",
 			Status:    pkg.StatusActive,
 			Policy:    pkg.PolicyNotify,
 			PID:       panePID,
+			CWD:       displayDir,
+			Args:      fmt.Sprintf("tmux attach -t %s", sessionName),
 			ParentApp: "tmux",
 		}
 

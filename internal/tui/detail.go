@@ -221,13 +221,7 @@ func (m Model) renderOutputPanel(sess *pkg.Session, w int) string {
 // ── Bottom bar ────────────────────────────────────────────────────────────────
 
 func (m Model) renderDetailBottomBar(w int) string {
-	if m.input.focused {
-		return renderInputBar(m.input.value, w)
-	}
-	return renderHelpBar([]helpItem{
-		{"/", "command"},
-		{"esc", "back"},
-	}, w)
+	return m.renderCommandBar(w)
 }
 
 // ── Session output reader ─────────────────────────────────────────────────────

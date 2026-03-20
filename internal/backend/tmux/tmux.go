@@ -76,7 +76,7 @@ func (b *Backend) ReadOutput(session pkg.Session, lines int) (string, error) {
 	if lines <= 0 {
 		lines = 50
 	}
-	cmd := exec.Command("tmux", "capture-pane", "-t", session.Target, "-p", "-S", fmt.Sprintf("-%d", lines))
+	cmd := exec.Command("tmux", "capture-pane", "-t", session.Target, "-p", "-e", "-S", fmt.Sprintf("-%d", lines))
 	out, err := cmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("%w: tmux capture-pane from %s: %v", pkg.ErrReadOutputFailed, session.Target, err)

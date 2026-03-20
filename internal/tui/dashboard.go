@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -267,26 +268,48 @@ func (m Model) renderCommandBar(w int) string {
 		Foreground(colorBorder).
 		Render(strings.Repeat("─", w))
 
+	// Show message/prompt above input if present
+	var msgLine string
+	if m.message != "" {
+		msgLine = lipgloss.NewStyle().
+			Foreground(colorInputFg).
+			Render("  " + m.message)
+	}
+
+	promptText := "❯ "
+	if m.pendingSpawn != "" {
+		promptText = "directory ❯ "
+	}
 	prompt := lipgloss.NewStyle().
 		Foreground(colorInputFg).
 		Bold(true).
-		Render("❯ ")
+		Render(promptText)
 
 	value := m.input.value
-	cursor := ""
-	if m.input.focused {
-		cursor = "█"
+	cursor := "█"
+
+	// Show autocomplete ghost text after cursor
+	ghost := ""
+	if m.input.suggestion != "" && strings.HasPrefix(m.input.suggestion, value) {
+		ghost = lipgloss.NewStyle().
+			Foreground(colorMuted).
+			Render(m.input.suggestion[len(value):])
 	}
 
 	inputLine := prompt + lipgloss.NewStyle().
 		Foreground(colorFg).
-		Render(value+cursor)
+		Render(value) + cursor + ghost
 
 	bottomRule := lipgloss.NewStyle().
 		Foreground(colorBorder).
 		Render(strings.Repeat("─", w))
 
-	return lipgloss.JoinVertical(lipgloss.Left, rule, inputLine, bottomRule)
+	parts := []string{rule}
+	if msgLine != "" {
+		parts = append(parts, msgLine)
+	}
+	parts = append(parts, inputLine, bottomRule)
+	return lipgloss.JoinVertical(lipgloss.Left, parts...)
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -295,13 +318,9 @@ func shortCWD(cwd string) string {
 	if cwd == "" {
 		return ""
 	}
-	home := "/Users/"
-	if idx := strings.Index(cwd, home); idx == 0 {
-		parts := strings.SplitN(cwd[len(home):], "/", 2)
-		if len(parts) == 2 {
-			return "~/" + parts[1]
-		}
-		return "~"
+	home, err := os.UserHomeDir()
+	if err == nil && strings.HasPrefix(cwd, home) {
+		return "~" + cwd[len(home):]
 	}
 	return cwd
 }
