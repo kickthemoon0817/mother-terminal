@@ -34,13 +34,6 @@ func (b *Backend) Discover() ([]pkg.Session, error) {
 		return nil, nil
 	}
 
-	knownCLIs := map[string]pkg.CLIType{
-		"claude":   pkg.CLIClaude,
-		"codex":    pkg.CLICodex,
-		"gemini":   pkg.CLIGemini,
-		"opencode": pkg.CLIOpenCode,
-	}
-
 	var sessions []pkg.Session
 	for _, winID := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		if winID == "" {
@@ -54,7 +47,7 @@ func (b *Backend) Discover() ([]pkg.Session, error) {
 		}
 		winName := strings.TrimSpace(string(nameOut))
 
-		for name, cliType := range knownCLIs {
+		for name, cliType := range pkg.KnownCLIs {
 			if strings.Contains(strings.ToLower(winName), name) {
 				sessions = append(sessions, pkg.Session{
 					ID:      fmt.Sprintf("x11-%s", winID),

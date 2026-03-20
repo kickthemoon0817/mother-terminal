@@ -12,6 +12,15 @@ const (
 	CLIOpenCode CLIType = "opencode"
 )
 
+// KnownCLIs maps binary names to CLI types. Single source of truth
+// used by all backends and discovery for process matching.
+var KnownCLIs = map[string]CLIType{
+	"claude":   CLIClaude,
+	"codex":    CLICodex,
+	"gemini":   CLIGemini,
+	"opencode": CLIOpenCode,
+}
+
 // BackendType identifies the injection backend.
 type BackendType string
 

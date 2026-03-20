@@ -3,11 +3,14 @@ package tmux
 import (
 	"fmt"
 	"os/exec"
+	"regexp"
 	"strings"
 	"time"
 
 	"github.com/kickthemoon0817/mother-terminal/pkg"
 )
+
+var validTmuxTarget = regexp.MustCompile(`^[a-zA-Z0-9_][a-zA-Z0-9_.\-:]*$`)
 
 // Backend implements the Injector interface for tmux.
 type Backend struct{}
@@ -28,13 +31,6 @@ func (b *Backend) Discover() ([]pkg.Session, error) {
 	}
 
 	var sessions []pkg.Session
-	knownCLIs := map[string]pkg.CLIType{
-		"claude":   pkg.CLIClaude,
-		"codex":    pkg.CLICodex,
-		"gemini":   pkg.CLIGemini,
-		"opencode": pkg.CLIOpenCode,
-	}
-
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		if line == "" {
 			continue
@@ -46,7 +42,7 @@ func (b *Backend) Discover() ([]pkg.Session, error) {
 		paneID := parts[0]
 		cmd := parts[2]
 
-		for name, cliType := range knownCLIs {
+		for name, cliType := range pkg.KnownCLIs {
 			if strings.Contains(strings.ToLower(cmd), name) {
 				sessions = append(sessions, pkg.Session{
 					ID:      fmt.Sprintf("tmux-%s", paneID),
@@ -66,7 +62,9 @@ func (b *Backend) Discover() ([]pkg.Session, error) {
 }
 
 func (b *Backend) SendKeys(session pkg.Session, text string) error {
-	// Use tmux send-keys to inject the text, then press Enter
+	if !validTmuxTarget.MatchString(session.Target) {
+		return fmt.Errorf("%w: invalid tmux target %q", pkg.ErrSendKeysFailed, session.Target)
+	}
 	cmd := exec.Command("tmux", "send-keys", "-t", session.Target, text, "Enter")
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("%w: tmux send-keys to %s: %v", pkg.ErrSendKeysFailed, session.Target, err)

@@ -52,7 +52,8 @@ func (wt *WindowTracker) StartWindow(sessionName string, cli pkg.CLIType) {
 	wt.saveState()
 }
 
-// GetWindow returns the usage window for a session.
+// GetWindow returns a copy of the usage window for a session.
+// Expiry is computed on read without mutating stored state.
 func (wt *WindowTracker) GetWindow(sessionName string) *pkg.UsageWindow {
 	wt.mu.RLock()
 	defer wt.mu.RUnlock()
@@ -62,15 +63,16 @@ func (wt *WindowTracker) GetWindow(sessionName string) *pkg.UsageWindow {
 		return nil
 	}
 
-	// Check if expired
-	if w.Active && time.Now().After(w.ExpiresAt) {
-		w.Active = false
+	// Return a copy with computed expiry — no mutation under RLock
+	copy := *w
+	if copy.Active && time.Now().After(copy.ExpiresAt) {
+		copy.Active = false
 	}
-
-	return w
+	return &copy
 }
 
-// GetAllWindows returns all tracked windows.
+// GetAllWindows returns copies of all tracked windows.
+// Expiry is computed on read without mutating stored state.
 func (wt *WindowTracker) GetAllWindows() []pkg.UsageWindow {
 	wt.mu.RLock()
 	defer wt.mu.RUnlock()
@@ -78,10 +80,11 @@ func (wt *WindowTracker) GetAllWindows() []pkg.UsageWindow {
 	now := time.Now()
 	result := make([]pkg.UsageWindow, 0, len(wt.windows))
 	for _, w := range wt.windows {
-		if w.Active && now.After(w.ExpiresAt) {
-			w.Active = false
+		copy := *w
+		if copy.Active && now.After(copy.ExpiresAt) {
+			copy.Active = false
 		}
-		result = append(result, *w)
+		result = append(result, copy)
 	}
 	return result
 }
@@ -111,12 +114,12 @@ func (wt *WindowTracker) loadState() {
 
 func (wt *WindowTracker) saveState() {
 	dir := filepath.Dir(wt.statePath)
-	os.MkdirAll(dir, 0755)
+	os.MkdirAll(dir, 0700)
 
 	data, err := json.MarshalIndent(wt.windows, "", "  ")
 	if err != nil {
 		return
 	}
 
-	os.WriteFile(wt.statePath, data, 0644)
+	os.WriteFile(wt.statePath, data, 0600)
 }
