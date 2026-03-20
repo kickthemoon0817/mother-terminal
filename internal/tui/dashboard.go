@@ -32,51 +32,18 @@ func (m Model) dashboardView() string {
 		h = 30
 	}
 
-	// Header
-	header := renderHeader(w)
-
 	// Session table
 	table := m.renderSessionTable(w)
 
-	// Status bar
-	statusBar := m.renderStatusBar(w)
-
-	// Help / input bar
-	bottomBar := m.renderBottomBar(w)
+	// Command input bar
+	inputBar := m.renderCommandBar(w)
 
 	// Stack all sections
 	return lipgloss.JoinVertical(
 		lipgloss.Left,
-		header,
 		table,
-		statusBar,
-		bottomBar,
+		inputBar,
 	)
-}
-
-// ── Header ────────────────────────────────────────────────────────────────────
-
-func renderHeader(w int) string {
-	title := lipgloss.NewStyle().
-		Foreground(colorFgBold).
-		Bold(true).
-		Render("MTT")
-
-	subtitle := lipgloss.NewStyle().
-		Foreground(colorMuted).
-		Render("AI CLI Orchestrator")
-
-	dot := lipgloss.NewStyle().Foreground(colorBorder).Render("  ·  ")
-
-	inner := title + dot + subtitle
-
-	return lipgloss.NewStyle().
-		BorderStyle(lipgloss.ThickBorder()).
-		BorderBottom(true).
-		BorderForeground(colorBorder).
-		Width(w).
-		Padding(0, 1).
-		Render(inner)
 }
 
 // ── Table ─────────────────────────────────────────────────────────────────────
@@ -224,15 +191,15 @@ func renderStatusBadge(status pkg.SessionStatus) string {
 	var label string
 	switch status {
 	case pkg.StatusActive:
-		label = "● active"
+		label = "●"
 	case pkg.StatusStalled:
-		label = "◐ stalled"
+		label = "◐"
 	case pkg.StatusDead:
-		label = "○ dead"
+		label = "○"
 	case pkg.StatusDiscovered:
-		label = "◌ found"
+		label = "◌"
 	default:
-		label = "? unknown"
+		label = "?"
 	}
 	return lipgloss.NewStyle().
 		Foreground(statusColor(status)).
@@ -293,6 +260,33 @@ func (m Model) renderBottomBar(w int) string {
 		{"enter", "detail"},
 		{"/", "command"},
 	}, w)
+}
+
+func (m Model) renderCommandBar(w int) string {
+	rule := lipgloss.NewStyle().
+		Foreground(colorBorder).
+		Render(strings.Repeat("─", w))
+
+	prompt := lipgloss.NewStyle().
+		Foreground(colorInputFg).
+		Bold(true).
+		Render("❯ ")
+
+	value := m.input.value
+	cursor := ""
+	if m.input.focused {
+		cursor = "█"
+	}
+
+	inputLine := prompt + lipgloss.NewStyle().
+		Foreground(colorFg).
+		Render(value+cursor)
+
+	bottomRule := lipgloss.NewStyle().
+		Foreground(colorBorder).
+		Render(strings.Repeat("─", w))
+
+	return lipgloss.JoinVertical(lipgloss.Left, rule, inputLine, bottomRule)
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

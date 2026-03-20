@@ -40,7 +40,7 @@ var (
 	colorDiscovered = lipgloss.Color("#60a5fa") // blue-400
 
 	// CLI type accents
-	colorClaude   = lipgloss.Color("#a78bfa") // violet-400
+	colorClaude   = lipgloss.Color("#e8956a") // claude terracotta
 	colorCodex    = lipgloss.Color("#34d399") // emerald-400
 	colorGemini   = lipgloss.Color("#fb923c") // orange-400
 	colorOpenCode = lipgloss.Color("#38bdf8") // sky-400
@@ -200,7 +200,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch key {
 		case "ctrl+c":
 			return m, tea.Quit
-		case "escape":
+		case "esc":
 			m.input.focused = false
 			m.input.value = ""
 			return m, nil
@@ -301,7 +301,7 @@ func (m Model) handleDashboardKey(key string) (tea.Model, tea.Cmd) {
 			m.selected = &s
 			m.mode = viewDetail
 		}
-	case "/":
+	case "/", "ㅗ", "tab":
 		m.input.focused = true
 	}
 	return m, nil
@@ -309,10 +309,10 @@ func (m Model) handleDashboardKey(key string) (tea.Model, tea.Cmd) {
 
 func (m Model) handleDetailKey(key string) (tea.Model, tea.Cmd) {
 	switch key {
-	case "escape":
+	case "esc":
 		m.mode = viewDashboard
 		m.selected = nil
-	case "/":
+	case "/", "ㅗ", "tab":
 		m.input.focused = true
 	}
 	return m, nil
