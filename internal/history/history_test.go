@@ -317,7 +317,10 @@ func TestLogPath_sanitizesSlashesAndSpaces(t *testing.T) {
 	inj := &mockInjector{name: pkg.BackendTmux}
 	rec, _ := newTestRecorder(t, inj)
 
-	path := rec.logPath("my/session name")
+	path, err := rec.logPath("my/session name")
+	if err != nil {
+		t.Fatalf("logPath error: %v", err)
+	}
 	base := filepath.Base(filepath.Dir(path))
 	if strings.Contains(base, "/") || strings.Contains(base, " ") {
 		t.Errorf("logPath not sanitized: %q", base)

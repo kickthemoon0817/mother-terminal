@@ -3,11 +3,14 @@ package remote
 import (
 	"fmt"
 	"os/exec"
+	"regexp"
 	"strings"
 	"time"
 
 	"github.com/kickthemoon0817/mother-terminal/pkg"
 )
+
+var validAddress = regexp.MustCompile(`^[a-zA-Z0-9._@%\-]+$`)
 
 // Host represents a remote machine connected via SSH (e.g., over Tailscale).
 type Host struct {
@@ -28,8 +31,12 @@ func NewClient() *Client {
 }
 
 // AddHost registers a remote host.
-func (c *Client) AddHost(name, address string) {
+func (c *Client) AddHost(name, address string) error {
+	if !validAddress.MatchString(address) {
+		return fmt.Errorf("invalid host address %q", address)
+	}
 	c.hosts[name] = &Host{Name: name, Address: address}
+	return nil
 }
 
 // RemoveHost removes a remote host.
@@ -74,8 +81,7 @@ func (c *Client) Spawn(hostName, cliName string) (*pkg.Session, error) {
 	sessionName := fmt.Sprintf("mtt-%s-%d", cliName, time.Now().Unix())
 
 	// Create tmux session on remote host
-	cmd := exec.Command("ssh", host.Address,
-		fmt.Sprintf("tmux new-session -d -s %s %s", sessionName, cliName))
+	cmd := exec.Command("ssh", host.Address, "tmux", "new-session", "-d", "-s", sessionName, cliName)
 	if err := cmd.Run(); err != nil {
 		return nil, fmt.Errorf("failed to spawn %s on %s: %v", cliName, host.Address, err)
 	}
@@ -99,8 +105,7 @@ func (c *Client) SendKeys(hostName, tmuxTarget, text string) error {
 		return fmt.Errorf("unknown host %q", hostName)
 	}
 
-	cmd := exec.Command("ssh", host.Address,
-		fmt.Sprintf("tmux send-keys -t %s %q Enter", tmuxTarget, text))
+	cmd := exec.Command("ssh", host.Address, "tmux", "send-keys", "-t", tmuxTarget, text, "Enter")
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("remote send-keys failed: %v", err)
 	}
@@ -117,8 +122,7 @@ func (c *Client) ReadOutput(hostName, tmuxTarget string, lines int) (string, err
 	if lines <= 0 {
 		lines = 50
 	}
-	cmd := exec.Command("ssh", host.Address,
-		fmt.Sprintf("tmux capture-pane -t %s -p -S -%d", tmuxTarget, lines))
+	cmd := exec.Command("ssh", host.Address, "tmux", "capture-pane", "-t", tmuxTarget, "-p", "-S", fmt.Sprintf("-%d", lines))
 	out, err := cmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("remote capture-pane failed: %v", err)
@@ -134,7 +138,7 @@ func (c *Client) DiscoverRemote(hostName string) ([]pkg.Session, error) {
 	}
 
 	cmd := exec.Command("ssh", "-o", "ConnectTimeout=5", host.Address,
-		"tmux list-panes -a -F '#{session_name}:#{window_index}.#{pane_index} #{pane_pid} #{pane_current_command}'")
+		"tmux", "list-panes", "-a", "-F", "#{session_name}:#{window_index}.#{pane_index} #{pane_pid} #{pane_current_command}")
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, nil

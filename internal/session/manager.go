@@ -2,6 +2,7 @@ package session
 
 import (
 	"fmt"
+	"sort"
 	"sync"
 
 	"github.com/kickthemoon0817/mother-terminal/pkg"
@@ -57,7 +58,7 @@ func (m *Manager) Get(name string) (*pkg.Session, error) {
 	return s, nil
 }
 
-// List returns all sessions.
+// List returns all sessions sorted by StartTime (newest first), then by Name.
 func (m *Manager) List() []pkg.Session {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -66,6 +67,12 @@ func (m *Manager) List() []pkg.Session {
 	for _, s := range m.sessions {
 		result = append(result, *s)
 	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].StartTime != result[j].StartTime {
+			return result[i].StartTime > result[j].StartTime
+		}
+		return result[i].Name < result[j].Name
+	})
 	return result
 }
 

@@ -73,6 +73,9 @@ func (b *Backend) SendKeys(session pkg.Session, text string) error {
 }
 
 func (b *Backend) ReadOutput(session pkg.Session, lines int) (string, error) {
+	if !validTmuxTarget.MatchString(session.Target) {
+		return "", fmt.Errorf("%w: invalid tmux target %q", pkg.ErrReadOutputFailed, session.Target)
+	}
 	if lines <= 0 {
 		lines = 50
 	}
@@ -85,6 +88,9 @@ func (b *Backend) ReadOutput(session pkg.Session, lines int) (string, error) {
 }
 
 func (b *Backend) Ping(session pkg.Session) (pkg.PingResult, error) {
+	if !validTmuxTarget.MatchString(session.Target) {
+		return pkg.PingResult{}, fmt.Errorf("invalid tmux target %q", session.Target)
+	}
 	start := time.Now()
 
 	// Liveness: check if the pane exists and has a running process

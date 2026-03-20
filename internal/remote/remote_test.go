@@ -9,7 +9,9 @@ import (
 
 func TestAddHost_registersHost(t *testing.T) {
 	c := NewClient()
-	c.AddHost("myserver", "user@myserver")
+	if err := c.AddHost("myserver", "user@myserver"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	hosts := c.ListHosts()
 	if len(hosts) != 1 {
@@ -22,8 +24,12 @@ func TestAddHost_registersHost(t *testing.T) {
 
 func TestAddHost_overwritesExistingHostWithSameName(t *testing.T) {
 	c := NewClient()
-	c.AddHost("srv", "old@srv")
-	c.AddHost("srv", "new@srv")
+	if err := c.AddHost("srv", "old@srv"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if err := c.AddHost("srv", "new@srv"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	hosts := c.ListHosts()
 	if len(hosts) != 1 {
@@ -36,7 +42,9 @@ func TestAddHost_overwritesExistingHostWithSameName(t *testing.T) {
 
 func TestRemoveHost_deletesRegisteredHost(t *testing.T) {
 	c := NewClient()
-	c.AddHost("toremove", "user@toremove")
+	if err := c.AddHost("toremove", "user@toremove"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	c.RemoveHost("toremove")
 
 	hosts := c.ListHosts()
@@ -124,27 +132,19 @@ func TestDiscoverRemote_returnsErrorForUnknownHost(t *testing.T) {
 // current construction and flag anything that changes.
 
 func TestSpawnSSHCommand_sessionNameDoesNotContainHostname(t *testing.T) {
-	// The session name is derived from cliName + Unix timestamp, never from
-	// the hostname, so a hostile hostname cannot influence the tmux session
-	// name that gets embedded in the remote command string.
+	// Addresses that contain shell metacharacters must be rejected by AddHost
+	// so they can never reach exec.Command as an SSH destination.
 	c := NewClient()
-	// Register a host whose address looks like a command injection attempt.
 	maliciousAddr := "user@host; rm -rf /"
-	c.AddHost("bad", maliciousAddr)
-
-	// We cannot call Spawn without a real SSH connection, but we can verify
-	// that the address is stored verbatim and would be passed as a single
-	// argument to exec.Command (not via a shell).
-	hosts := c.ListHosts()
-	if len(hosts) != 1 {
-		t.Fatalf("expected 1 host, got %d", len(hosts))
+	err := c.AddHost("bad", maliciousAddr)
+	if err == nil {
+		t.Fatal("expected AddHost to reject malicious address, got nil error")
 	}
-	// The address is stored exactly as provided. exec.Command passes it as
-	// a single argv element, so the semicolon does NOT create a second shell
-	// command — but it would still be passed to ssh as a destination, which
-	// ssh would reject. This test documents the trust boundary.
-	if hosts[0].Address != maliciousAddr {
-		t.Errorf("address was modified unexpectedly: %q", hosts[0].Address)
+
+	// No host should have been registered.
+	hosts := c.ListHosts()
+	if len(hosts) != 0 {
+		t.Fatalf("expected 0 hosts after rejection, got %d", len(hosts))
 	}
 }
 

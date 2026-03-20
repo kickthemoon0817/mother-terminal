@@ -73,7 +73,10 @@ func (r *Recorder) StopAll() {
 
 // GetHistory returns the stored history for a session.
 func (r *Recorder) GetHistory(sessionName string, lines int) (string, error) {
-	logPath := r.logPath(sessionName)
+	logPath, err := r.logPath(sessionName)
+	if err != nil {
+		return "", fmt.Errorf("invalid session name %q: %w", sessionName, err)
+	}
 	data, err := os.ReadFile(logPath)
 	if err != nil {
 		return "", fmt.Errorf("no history for session %q", sessionName)
@@ -105,7 +108,13 @@ func (r *Recorder) Search(query string) ([]SearchResult, error) {
 			continue
 		}
 		sessionName := entry.Name()
-		logPath := filepath.Join(r.baseDir, sessionName, "output.log")
+		// Verify the subdirectory path stays under baseDir before reading.
+		candidate := filepath.Clean(filepath.Join(r.baseDir, sessionName))
+		cleanBase := filepath.Clean(r.baseDir)
+		if !strings.HasPrefix(candidate, cleanBase+string(filepath.Separator)) && candidate != cleanBase {
+			continue
+		}
+		logPath := filepath.Join(candidate, "output.log")
 		data, err := os.ReadFile(logPath)
 		if err != nil {
 			continue
@@ -213,7 +222,10 @@ func (r *Recorder) captureSnapshot(sess pkg.Session) {
 }
 
 func (r *Recorder) appendLog(sessionName, content string) {
-	logPath := r.logPath(sessionName)
+	logPath, err := r.logPath(sessionName)
+	if err != nil {
+		return
+	}
 	dir := filepath.Dir(logPath)
 	os.MkdirAll(dir, 0700)
 
@@ -229,9 +241,15 @@ func (r *Recorder) appendLog(sessionName, content string) {
 	}
 }
 
-func (r *Recorder) logPath(sessionName string) string {
+func (r *Recorder) logPath(sessionName string) (string, error) {
 	// Sanitize session name for filesystem
 	safe := strings.ReplaceAll(sessionName, "/", "_")
 	safe = strings.ReplaceAll(safe, " ", "_")
-	return filepath.Join(r.baseDir, safe, "output.log")
+	safe = strings.ReplaceAll(safe, "..", "__")
+	candidate := filepath.Clean(filepath.Join(r.baseDir, safe, "output.log"))
+	cleanBase := filepath.Clean(r.baseDir)
+	if !strings.HasPrefix(candidate, cleanBase+string(filepath.Separator)) {
+		return "", fmt.Errorf("path %q escapes base directory", candidate)
+	}
+	return candidate, nil
 }

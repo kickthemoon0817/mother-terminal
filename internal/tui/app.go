@@ -307,7 +307,27 @@ func (m Model) handleInputSubmit() (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case value == "/help" || value == "/h":
-		// Stay in current view, help is shown in the help bar
+		m.message = "commands: /spawn /attach /history /connect /discover /ping /hosts /refresh /back /quit"
+		return m, nil
+
+	case value == "/attach" || value == "/a":
+		// Attach to the selected session's tmux pane
+		if m.selected != nil && m.selected.Backend == pkg.BackendTmux {
+			target := m.selected.Target
+			return m, tea.ExecProcess(exec.Command("tmux", "attach", "-t", target), func(err error) tea.Msg {
+				return refreshMsg{}
+			})
+		}
+		// If in dashboard, attach to session under cursor
+		if len(m.sessions) > 0 && m.cursor < len(m.sessions) {
+			s := m.sessions[m.cursor]
+			if s.Backend == pkg.BackendTmux {
+				return m, tea.ExecProcess(exec.Command("tmux", "attach", "-t", s.Target), func(err error) tea.Msg {
+					return refreshMsg{}
+				})
+			}
+			m.message = "cannot attach — session is not in tmux"
+		}
 		return m, nil
 
 	case strings.HasPrefix(value, "/spawn "):
@@ -315,7 +335,11 @@ func (m Model) handleInputSubmit() (tea.Model, tea.Cmd) {
 		// /spawn claude --remote myserver — immediate remote spawn
 		if strings.Contains(args, "--remote ") {
 			parts := strings.SplitN(args, "--remote ", 2)
-			cliName := strings.TrimSpace(parts[0])
+			cliName := strings.ToLower(strings.TrimSpace(parts[0]))
+			if _, ok := pkg.KnownCLIs[cliName]; !ok {
+				m.message = fmt.Sprintf("unknown CLI %q — use: claude, codex, gemini, opencode", cliName)
+				return m, nil
+			}
 			hostName := strings.TrimSpace(parts[1])
 			return m, m.spawnRemoteSession(cliName, hostName)
 		}
@@ -357,7 +381,10 @@ func (m Model) handleInputSubmit() (tea.Model, tea.Cmd) {
 			name = parts[1]
 		}
 		if m.remotes != nil {
-			m.remotes.AddHost(name, address)
+			if err := m.remotes.AddHost(name, address); err != nil {
+				m.message = fmt.Sprintf("invalid address: %v", err)
+				return m, nil
+			}
 			m.message = fmt.Sprintf("connected: %s", address)
 		}
 		return m, nil
