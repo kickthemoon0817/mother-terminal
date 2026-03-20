@@ -214,25 +214,89 @@ func (b *Backend) traceParentApp(ppid string, pidComm map[string]string) string 
 }
 
 func (b *Backend) SendKeys(session pkg.Session, text string) error {
-	ttyPath := session.Target
-	if !strings.HasPrefix(ttyPath, "/dev/") {
-		return fmt.Errorf("%w: invalid TTY target %q", pkg.ErrSendKeysFailed, ttyPath)
+	// Strategy 1: If tmux is available and session is in a tmux pane, use send-keys
+	if tmuxTarget := b.findTmuxPane(session.PID); tmuxTarget != "" {
+		cmd := exec.Command("tmux", "send-keys", "-t", tmuxTarget, text, "Enter")
+		if err := cmd.Run(); err == nil {
+			return nil
+		}
+		// Fall through to AppleScript if tmux send-keys fails
 	}
 
-	// Write directly to the TTY device — this appears as keyboard input
-	// to the process. Works for ANY terminal app (VS Code, iTerm2, Terminal, Warp, etc.)
-	f, err := os.OpenFile(ttyPath, os.O_WRONLY, 0)
+	// Strategy 2: AppleScript System Events keystroke
+	// Write text to temp file to avoid AppleScript injection
+	tmpFile, err := os.CreateTemp("", "mtt-input-*")
 	if err != nil {
-		return fmt.Errorf("%w: cannot open TTY %s: %v", pkg.ErrSendKeysFailed, ttyPath, err)
+		return fmt.Errorf("%w: failed to create temp file: %v", pkg.ErrSendKeysFailed, err)
 	}
-	defer f.Close()
+	defer os.Remove(tmpFile.Name())
 
-	_, err = f.WriteString(text + "\n")
-	if err != nil {
-		return fmt.Errorf("%w: write to TTY %s: %v", pkg.ErrSendKeysFailed, ttyPath, err)
+	if _, err := tmpFile.WriteString(text + "\n"); err != nil {
+		tmpFile.Close()
+		return fmt.Errorf("%w: failed to write temp file: %v", pkg.ErrSendKeysFailed, err)
+	}
+	tmpFile.Close()
+
+	// Detect the terminal app for this session
+	app := session.ParentApp
+	if app == "" || app == "unknown" {
+		app = b.detectAppForTTY(session.Target)
 	}
 
+	// Map friendly names to AppleScript-compatible app names
+	appName := b.resolveAppName(app)
+
+	script := fmt.Sprintf(`
+		set inputText to (read POSIX file %q)
+		if inputText ends with linefeed then
+			set inputText to text 1 thru -2 of inputText
+		end if
+		tell application %q to activate
+		delay 0.3
+		tell application "System Events"
+			keystroke inputText
+			keystroke return
+		end tell
+	`, tmpFile.Name(), appName)
+
+	if err := exec.Command("osascript", "-e", script).Run(); err != nil {
+		return fmt.Errorf("%w: AppleScript keystroke failed (Accessibility permissions may be needed): %v", pkg.ErrSendKeysFailed, err)
+	}
 	return nil
+}
+
+// findTmuxPane checks if a process is running inside a tmux pane.
+func (b *Backend) findTmuxPane(pid string) string {
+	if pid == "" {
+		return ""
+	}
+	if _, err := exec.LookPath("tmux"); err != nil {
+		return ""
+	}
+	// List all tmux panes and match by PID
+	out, err := exec.Command("tmux", "list-panes", "-a", "-F", "#{pane_pid} #{session_name}:#{window_index}.#{pane_index}").Output()
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 2 && fields[0] == pid {
+			return fields[1]
+		}
+	}
+	return ""
+}
+
+// resolveAppName maps parent app names to AppleScript-compatible names.
+func (b *Backend) resolveAppName(app string) string {
+	switch app {
+	case "VS Code":
+		return "Visual Studio Code"
+	case "Terminal.app":
+		return "Terminal"
+	default:
+		return app
+	}
 }
 
 func (b *Backend) ReadOutput(session pkg.Session, lines int) (string, error) {

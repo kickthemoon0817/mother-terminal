@@ -227,7 +227,6 @@ func (m Model) renderDetailBottomBar(w int) string {
 	return renderHelpBar([]helpItem{
 		{"/", "command"},
 		{"esc", "back"},
-		{"q", "quit"},
 	}, w)
 }
 

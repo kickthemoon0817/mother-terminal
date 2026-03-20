@@ -174,10 +174,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
 
-	// Global quit (only when input not focused)
+	// Global quit
 	if !m.input.focused {
 		switch key {
-		case "ctrl+c", "q":
+		case "ctrl+c":
 			return m, tea.Quit
 		}
 	} else {
@@ -268,11 +268,11 @@ func (m Model) handleInputSubmit() (tea.Model, tea.Cmd) {
 
 func (m Model) handleDashboardKey(key string) (tea.Model, tea.Cmd) {
 	switch key {
-	case "up", "k":
+	case "up":
 		if m.cursor > 0 {
 			m.cursor--
 		}
-	case "down", "j":
+	case "down":
 		if m.cursor < len(m.sessions)-1 {
 			m.cursor++
 		}
@@ -282,10 +282,8 @@ func (m Model) handleDashboardKey(key string) (tea.Model, tea.Cmd) {
 			m.selected = &s
 			m.mode = viewDetail
 		}
-	case "/", "tab":
+	case "/":
 		m.input.focused = true
-	case "r":
-		m.sessions = m.manager.List()
 	}
 	return m, nil
 }
@@ -295,7 +293,7 @@ func (m Model) handleDetailKey(key string) (tea.Model, tea.Cmd) {
 	case "escape":
 		m.mode = viewDashboard
 		m.selected = nil
-	case "/", "tab":
+	case "/":
 		m.input.focused = true
 	}
 	return m, nil

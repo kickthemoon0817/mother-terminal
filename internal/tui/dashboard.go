@@ -289,11 +289,9 @@ func (m Model) renderBottomBar(w int) string {
 		return renderInputBar(m.input.value, w)
 	}
 	return renderHelpBar([]helpItem{
-		{"↑↓/jk", "navigate"},
+		{"↑↓", "navigate"},
 		{"enter", "detail"},
 		{"/", "command"},
-		{"r", "refresh"},
-		{"q", "quit"},
 	}, w)
 }
 
