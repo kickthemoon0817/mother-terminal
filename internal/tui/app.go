@@ -2,6 +2,9 @@ package tui
 
 import (
 	"fmt"
+	"os/exec"
+	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -159,6 +162,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tickMsg:
 		return m, tickCmd()
+
+	case spawnMsg:
+		if msg.err != nil {
+			m.err = msg.err
+			return m, nil
+		}
+		if msg.session != nil {
+			m.manager.AddOrUpdate(*msg.session)
+			m.sessions = m.manager.List()
+		}
+		return m, nil
 	}
 
 	// Delegate to input model when focused
@@ -247,6 +261,11 @@ func (m Model) handleInputSubmit() (tea.Model, tea.Cmd) {
 	case value == "/help" || value == "/h":
 		// Stay in current view, help is shown in the help bar
 		return m, nil
+
+	case strings.HasPrefix(value, "/spawn "):
+		// /spawn claude — start a new AI CLI session in a tmux pane
+		cliName := strings.TrimSpace(strings.TrimPrefix(value, "/spawn"))
+		return m, m.spawnSession(cliName)
 
 	default:
 		// If in detail view with a selected session, send as query
@@ -340,6 +359,55 @@ func (m Model) sendQuery(sess *pkg.Session, query string) tea.Cmd {
 		}
 		inj.SendKeys(*sess, query)
 		return refreshMsg{}
+	}
+}
+
+// spawnMsg is sent after a new session is spawned.
+type spawnMsg struct {
+	session *pkg.Session
+	err     error
+}
+
+func (m Model) spawnSession(cliName string) tea.Cmd {
+	return func() tea.Msg {
+		// Validate CLI name
+		cliName = strings.ToLower(strings.TrimSpace(cliName))
+		if _, ok := pkg.KnownCLIs[cliName]; !ok {
+			return spawnMsg{err: fmt.Errorf("unknown CLI %q — use: claude, codex, gemini, opencode", cliName)}
+		}
+
+		// Create a unique tmux session name
+		sessionName := fmt.Sprintf("mtt-%s-%d", cliName, time.Now().Unix())
+
+		// Spawn in tmux
+		cmd := exec.Command("tmux", "new-session", "-d", "-s", sessionName, cliName)
+		if err := cmd.Run(); err != nil {
+			return spawnMsg{err: fmt.Errorf("failed to spawn %s in tmux: %v", cliName, err)}
+		}
+
+		// Wait briefly for process to start
+		time.Sleep(500 * time.Millisecond)
+
+		// Get the pane PID
+		out, err := exec.Command("tmux", "list-panes", "-t", sessionName, "-F", "#{pane_pid}").Output()
+		if err != nil {
+			return spawnMsg{err: fmt.Errorf("spawned but couldn't get pane info: %v", err)}
+		}
+		panePID := strings.TrimSpace(string(out))
+
+		sess := &pkg.Session{
+			ID:        fmt.Sprintf("tmux-%s-%s", cliName, sessionName),
+			Name:      fmt.Sprintf("%s [%s]", cliName, sessionName),
+			CLI:       pkg.CLIType(cliName),
+			Backend:   pkg.BackendTmux,
+			Target:    sessionName + ":0.0",
+			Status:    pkg.StatusActive,
+			Policy:    pkg.PolicyNotify,
+			PID:       panePID,
+			ParentApp: "tmux",
+		}
+
+		return spawnMsg{session: sess}
 	}
 }
 

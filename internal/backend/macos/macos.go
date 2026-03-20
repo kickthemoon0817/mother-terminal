@@ -93,13 +93,14 @@ func (b *Backend) scanProcesses() ([]discoveredProcess, error) {
 	}
 
 	// Build PID -> comm map for parent lookup
+	// comm field can contain spaces (e.g., "Code Helper"), so join fields[3:]
 	pidComm := make(map[string]string)
 	for _, line := range strings.Split(string(out), "\n") {
 		fields := strings.Fields(line)
 		if len(fields) < 4 {
 			continue
 		}
-		pidComm[fields[0]] = fields[3]
+		pidComm[fields[0]] = strings.Join(fields[3:], " ")
 	}
 
 	var procs []discoveredProcess
@@ -111,7 +112,7 @@ func (b *Backend) scanProcesses() ([]discoveredProcess, error) {
 		pid := fields[0]
 		tty := fields[1]
 		ppid := fields[2]
-		comm := fields[3]
+		comm := strings.Join(fields[3:], " ")
 
 		// Get base command name
 		parts := strings.Split(comm, "/")
@@ -220,49 +221,12 @@ func (b *Backend) SendKeys(session pkg.Session, text string) error {
 		if err := cmd.Run(); err == nil {
 			return nil
 		}
-		// Fall through to AppleScript if tmux send-keys fails
 	}
 
-	// Strategy 2: AppleScript System Events keystroke
-	// Write text to temp file to avoid AppleScript injection
-	tmpFile, err := os.CreateTemp("", "mtt-input-*")
-	if err != nil {
-		return fmt.Errorf("%w: failed to create temp file: %v", pkg.ErrSendKeysFailed, err)
-	}
-	defer os.Remove(tmpFile.Name())
-
-	if _, err := tmpFile.WriteString(text + "\n"); err != nil {
-		tmpFile.Close()
-		return fmt.Errorf("%w: failed to write temp file: %v", pkg.ErrSendKeysFailed, err)
-	}
-	tmpFile.Close()
-
-	// Detect the terminal app for this session
-	app := session.ParentApp
-	if app == "" || app == "unknown" {
-		app = b.detectAppForTTY(session.Target)
-	}
-
-	// Map friendly names to AppleScript-compatible app names
-	appName := b.resolveAppName(app)
-
-	script := fmt.Sprintf(`
-		set inputText to (read POSIX file %q)
-		if inputText ends with linefeed then
-			set inputText to text 1 thru -2 of inputText
-		end if
-		tell application %q to activate
-		delay 0.3
-		tell application "System Events"
-			keystroke inputText
-			keystroke return
-		end tell
-	`, tmpFile.Name(), appName)
-
-	if err := exec.Command("osascript", "-e", script).Run(); err != nil {
-		return fmt.Errorf("%w: AppleScript keystroke failed (Accessibility permissions may be needed): %v", pkg.ErrSendKeysFailed, err)
-	}
-	return nil
+	// Strategy 2: Non-tmux sessions cannot receive input on macOS
+	// without Accessibility permissions (macOS blocks osascript keystroke).
+	// Suggest the user spawn sessions via /spawn for full control.
+	return fmt.Errorf("%w: session %q is not in a tmux pane — use /spawn to start sessions with full input control", pkg.ErrSendKeysFailed, session.Name)
 }
 
 // findTmuxPane checks if a process is running inside a tmux pane.
