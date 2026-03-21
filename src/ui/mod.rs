@@ -1346,8 +1346,9 @@ impl App {
 
                 // Calculate pane size from current terminal size
                 let (cols, rows) = self.terminal_size;
-                let pane_rows = rows.saturating_sub(4);
-                let pane_cols = cols.saturating_sub(self.sidebar_width + 2);
+                // Match resize calculation: chrome(4) + pane borders(2) + sidebar + sidebar border(1)
+                let pane_rows = rows.saturating_sub(6);
+                let pane_cols = cols.saturating_sub(self.sidebar_width + 3);
 
                 let id = self.panes.len();
                 match Pane::spawn(id, cli, &cwd, pane_rows.max(10), pane_cols.max(20), &extra_args) {
@@ -1446,18 +1447,21 @@ impl App {
         // Account for: status bar (1) + usage bar (1) + pane border (2)
         let chrome_rows: u16 = 4;
 
+        // Pane borders take 2 cols (left+right) and 2 rows (top+bottom)
+        let border_cols: u16 = 2;
+        let border_rows: u16 = 2;
+
         let (pane_rows, pane_cols) = match self.panel_position {
             PanelPosition::Left => {
-                // Sidebar on left: subtract sidebar width + border
-                let pr = rows.saturating_sub(chrome_rows);
-                let pc = cols.saturating_sub(self.sidebar_width + 2);
+                // sidebar + sidebar border (1) + pane borders (2)
+                let pr = rows.saturating_sub(chrome_rows + border_rows);
+                let pc = cols.saturating_sub(self.sidebar_width + 1 + border_cols);
                 (pr, pc)
             }
             PanelPosition::Bottom => {
-                // Tab bar at bottom: subtract 1 extra row for tab bar
                 let extra = if self.show_bottom_panel { BOTTOM_PANEL_HEIGHT } else { 1 };
-                let pr = rows.saturating_sub(chrome_rows + extra);
-                let pc = cols.saturating_sub(2); // just pane borders
+                let pr = rows.saturating_sub(chrome_rows + extra + border_rows);
+                let pc = cols.saturating_sub(border_cols);
                 (pr, pc)
             }
         };
