@@ -847,16 +847,19 @@ impl App {
                     .fg(Color::Rgb(120, 80, 170))
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::raw(&self.command_input),
+            Span::styled(
+                &self.command_input,
+                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            ),
         ];
 
-        // Tab completion hint
+        // Tab completion hint (dimmer than input)
         if !self.tab_matches.is_empty() {
             let hint = &self.tab_matches[self.tab_index % self.tab_matches.len()];
             if hint.len() > self.command_input.len() {
                 spans.push(Span::styled(
                     &hint[self.command_input.len()..],
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(Color::Rgb(70, 70, 70)),
                 ));
             }
         }
@@ -1387,13 +1390,32 @@ impl App {
     fn handle_resize(&mut self, cols: u16, rows: u16) {
         self.terminal_size = (cols, rows);
 
-        // Calculate pane size: full height minus status+command, width minus sidebar
-        let pane_rows = rows.saturating_sub(4); // status + border top + border bottom + command
-        let pane_cols = cols.saturating_sub(self.sidebar_width + 2); // sidebar + border
+        // Account for: status bar (1) + usage bar (1) + pane border (2)
+        let chrome_rows: u16 = 4;
+
+        let (pane_rows, pane_cols) = match self.panel_position {
+            PanelPosition::Left => {
+                // Sidebar on left: subtract sidebar width + border
+                let pr = rows.saturating_sub(chrome_rows);
+                let pc = cols.saturating_sub(self.sidebar_width + 2);
+                (pr, pc)
+            }
+            PanelPosition::Bottom => {
+                // Tab bar at bottom: subtract 1 extra row for tab bar
+                let extra = if self.show_bottom_panel { BOTTOM_PANEL_HEIGHT } else { 1 };
+                let pr = rows.saturating_sub(chrome_rows + extra);
+                let pc = cols.saturating_sub(2); // just pane borders
+                (pr, pc)
+            }
+        };
 
         for pane in &mut self.panes {
             let _ = pane.resize(pane_rows.max(1), pane_cols.max(1));
         }
+
+        // Close overlays on resize to avoid rendering issues
+        self.show_session_picker = false;
+        self.show_help = false;
     }
 }
 
