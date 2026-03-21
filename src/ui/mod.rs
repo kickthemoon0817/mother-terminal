@@ -18,6 +18,7 @@ use std::io::stdout;
 use std::time::{Duration, Instant};
 
 use crate::pane::{CLIType, Pane, Status};
+use crate::persist;
 
 const DEFAULT_SIDEBAR_WIDTH: u16 = 20;
 const MIN_SIDEBAR_WIDTH: u16 = 12;
@@ -499,12 +500,12 @@ impl App {
             let rem_m = remaining_mins % 60;
 
             spans.push(Span::styled(
-                "●".to_string(),
+                "● ".to_string(),
                 Style::default().fg(cli_color(cli)),
             ));
             spans.push(Span::styled(
                 format!("{name} {limit_h}h:{pct}%({rem_h}h{rem_m:02}m)"),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(Color::Gray),
             ));
             if count > 0 {
                 spans.push(Span::styled(
@@ -940,6 +941,11 @@ impl App {
         }
 
         match (key.modifiers, key.code) {
+            // Ctrl-Q: save sessions and quit
+            (KeyModifiers::CONTROL, KeyCode::Char('q')) => {
+                self.save_and_quit();
+                return;
+            }
             // Ctrl-C: context-aware
             (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
                 let double = self
@@ -1414,7 +1420,7 @@ impl App {
             }
 
             "quit" | "q" => {
-                self.should_quit = true;
+                self.save_and_quit();
             }
 
             "sessions" | "ss" => {
@@ -1446,6 +1452,54 @@ impl App {
                 self.message = format!("unknown command: {}", parts[0]);
             }
         }
+    }
+
+    fn save_and_quit(&mut self) {
+        // Save session info for restore
+        let sessions: Vec<persist::SessionInfo> = self
+            .panes
+            .iter()
+            .filter(|p| p.status == Status::Active)
+            .map(|p| persist::SessionInfo {
+                cli_type: p.cli.name().to_string(),
+                cwd: p.cwd.clone(),
+                status: "saved".to_string(),
+            })
+            .collect();
+        let _ = persist::save_sessions(&sessions);
+        self.should_quit = true;
+    }
+
+    /// Load previous sessions and re-spawn them.
+    pub fn restore_sessions(&mut self) {
+        let saved = persist::load_sessions();
+        if saved.is_empty() {
+            return;
+        }
+        let (cols, rows) = self.terminal_size;
+        let pane_rows = rows.saturating_sub(6);
+        let pane_cols = cols.saturating_sub(self.sidebar_width + 3);
+
+        for info in &saved {
+            let cli = match CLIType::from_str(&info.cli_type) {
+                Some(c) => c,
+                None => continue,
+            };
+            let id = self.panes.len();
+            match Pane::spawn(id, cli, &info.cwd, pane_rows.max(10), pane_cols.max(20), &[]) {
+                Ok(mut pane) => {
+                    let _ = pane.resize(pane_rows.max(1), pane_cols.max(1));
+                    self.panes.push(pane);
+                }
+                Err(_) => continue,
+            }
+        }
+        if !self.panes.is_empty() {
+            self.focused = 0;
+            self.message = format!("restored {} sessions", self.panes.len());
+        }
+        // Clear saved file after restore
+        let _ = persist::save_sessions(&[]);
     }
 
     // ── Resize ───────────────────────────────────────────────────────────
