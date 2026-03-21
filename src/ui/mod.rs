@@ -197,17 +197,16 @@ impl App {
                     self.draw_pane_content(frame, main[1], self.focused);
                 }
                 PanelPosition::Bottom => {
-                    let session_bar_height = (self.panes.len() as u16 + 2).min(6);
                     let main = Layout::default()
                         .direction(Direction::Vertical)
                         .constraints([
                             Constraint::Min(1),
-                            Constraint::Length(session_bar_height),
+                            Constraint::Length(1),
                         ])
                         .split(main_area);
 
                     self.draw_pane_content(frame, main[0], self.focused);
-                    self.draw_sidebar(frame, main[1]);
+                    self.draw_session_tab_bar(frame, main[1]);
                 }
             }
         }
@@ -452,6 +451,51 @@ impl App {
             let row = Rect { x: inner.x, y: row_y, width: inner.width, height: 1 };
             frame.render_widget(Paragraph::new(line), row);
         }
+    }
+
+    fn draw_session_tab_bar(&self, frame: &mut Frame, area: Rect) {
+        let mut spans = vec![
+            Span::styled("─", Style::default().fg(Color::DarkGray)),
+            Span::raw(" "),
+        ];
+
+        for (i, pane) in self.panes.iter().enumerate() {
+            let is_focused = i == self.focused;
+
+            let status_icon = match pane.status {
+                Status::Active => "●",
+                Status::Stalled => "◐",
+                Status::Dead => "✕",
+            };
+
+            let project = std::path::Path::new(&pane.cwd)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "?".to_string());
+
+            let label = format!("{status_icon} {}", truncate_str(&project, 12));
+
+            if is_focused {
+                spans.push(Span::styled(
+                    format!(" {label} "),
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(cli_color(pane.cli))
+                        .add_modifier(Modifier::BOLD),
+                ));
+            } else {
+                spans.push(Span::styled(
+                    format!(" {label} "),
+                    Style::default().fg(Color::Gray),
+                ));
+            }
+
+            spans.push(Span::styled(" │ ", Style::default().fg(Color::DarkGray)));
+        }
+
+        let bar = Paragraph::new(Line::from(spans))
+            .style(Style::default().bg(Color::Rgb(25, 25, 25)));
+        frame.render_widget(bar, area);
     }
 
     fn draw_help_overlay(&self, frame: &mut Frame, area: Rect) {
