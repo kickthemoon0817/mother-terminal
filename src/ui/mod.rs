@@ -652,8 +652,8 @@ impl App {
         spans.push(Span::styled("█", Style::default().fg(Color::Cyan)));
 
         let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Cyan))
+            .borders(Borders::TOP | Borders::BOTTOM)
+            .border_style(Style::default().fg(Color::DarkGray))
             .style(Style::default().bg(Color::Rgb(20, 20, 25)));
 
         let para = Paragraph::new(Line::from(spans)).block(block);
