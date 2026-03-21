@@ -19,7 +19,10 @@ use std::time::{Duration, Instant};
 
 use crate::pane::{CLIType, Pane, Status};
 
-const SIDEBAR_WIDTH: u16 = 22;
+const DEFAULT_SIDEBAR_WIDTH: u16 = 20;
+const MIN_SIDEBAR_WIDTH: u16 = 12;
+const MAX_SIDEBAR_WIDTH: u16 = 40;
+const BOTTOM_PANEL_HEIGHT: u16 = 5;
 
 /// Known commands for tab autocomplete.
 const COMMANDS: &[&str] = &[
@@ -50,7 +53,10 @@ pub struct App {
     should_quit: bool,
     last_ctrl_c: Option<Instant>,
     scroll_offset: u16,
-    terminal_size: (u16, u16), // (cols, rows)
+    terminal_size: (u16, u16),
+    sidebar_width: u16,
+    sidebar_dragging: bool,
+    show_bottom_panel: bool,
 }
 
 impl App {
@@ -69,6 +75,9 @@ impl App {
             last_ctrl_c: None,
             scroll_offset: 0,
             terminal_size: (80, 24),
+            sidebar_width: DEFAULT_SIDEBAR_WIDTH,
+            sidebar_dragging: false,
+            show_bottom_panel: false,
         }
     }
 
@@ -145,13 +154,28 @@ impl App {
                 .style(Style::default().fg(Color::DarkGray));
             frame.render_widget(msg, outer[1]);
         } else {
+            // Split main area: optional bottom panel
+            let main_area = if self.show_bottom_panel {
+                let vsplit = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Min(1),
+                        Constraint::Length(BOTTOM_PANEL_HEIGHT),
+                    ])
+                    .split(outer[1]);
+                self.draw_bottom_panel(frame, vsplit[1]);
+                vsplit[0]
+            } else {
+                outer[1]
+            };
+
             let main = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([
-                    Constraint::Length(SIDEBAR_WIDTH),
+                    Constraint::Length(self.sidebar_width),
                     Constraint::Min(1),
                 ])
-                .split(outer[1]);
+                .split(main_area);
 
             self.draw_sidebar(frame, main[0]);
             self.draw_pane_content(frame, main[1], self.focused);
@@ -266,28 +290,35 @@ impl App {
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| pane.cwd.clone());
 
-            let label = format!(
-                " {} {} {}",
-                status_icon,
-                pane.cli.name(),
-                truncate_str(&project, 10)
-            );
-
-            let style = if is_focused {
-                Style::default()
-                    .fg(cli_color(pane.cli))
-                    .bg(Color::Rgb(40, 40, 40))
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::Gray)
-            };
+            let max_name = (self.sidebar_width as usize).saturating_sub(7);
 
             let line = Line::from(vec![
                 Span::styled(
                     format!(" {}", i + 1),
-                    Style::default().fg(Color::DarkGray),
+                    if is_focused {
+                        Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::DarkGray)
+                    },
                 ),
-                Span::styled(label, style),
+                Span::styled(
+                    format!(" {status_icon}"),
+                    Style::default().fg(match pane.status {
+                        Status::Active => Color::Green,
+                        Status::Stalled => Color::Yellow,
+                        Status::Dead => Color::Red,
+                    }),
+                ),
+                Span::styled(
+                    format!(" {}", truncate_str(&project, max_name)),
+                    if is_focused {
+                        Style::default()
+                            .fg(cli_color(pane.cli))
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::Gray)
+                    },
+                ),
             ]);
 
             let row_area = Rect {
@@ -304,6 +335,82 @@ impl App {
             };
 
             frame.render_widget(Paragraph::new(line).style(bg), row_area);
+        }
+    }
+
+    fn draw_bottom_panel(&self, frame: &mut Frame, area: Rect) {
+        let block = Block::default()
+            .borders(Borders::TOP)
+            .border_style(Style::default().fg(Color::DarkGray))
+            .title(Span::styled(
+                " usage & sessions ",
+                Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD),
+            ));
+
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+
+        // Row 1: Usage limits per CLI
+        let mut limit_spans = vec![
+            Span::styled("  limits  ", Style::default().fg(Color::DarkGray)),
+        ];
+        for (cli, name, limit) in [
+            (CLIType::Claude, "claude", "5h"),
+            (CLIType::Codex, "codex", "5h"),
+            (CLIType::Gemini, "gemini", "4h"),
+            (CLIType::OpenCode, "opencode", "—"),
+        ] {
+            let count = self.panes.iter().filter(|p| p.cli == cli && p.status == Status::Active).count();
+            limit_spans.push(Span::styled(
+                format!("● {name}:{limit}"),
+                Style::default().fg(cli_color(cli)),
+            ));
+            if count > 0 {
+                limit_spans.push(Span::styled(
+                    format!("({count}) "),
+                    Style::default().fg(Color::Gray),
+                ));
+            }
+            limit_spans.push(Span::raw("  "));
+        }
+        if inner.height > 0 {
+            let row = Rect { x: inner.x, y: inner.y, width: inner.width, height: 1 };
+            frame.render_widget(Paragraph::new(Line::from(limit_spans)), row);
+        }
+
+        // Row 2+: Session list with numbers
+        for (i, pane) in self.panes.iter().enumerate() {
+            let row_y = inner.y + 1 + i as u16;
+            if row_y >= inner.y + inner.height {
+                break;
+            }
+
+            let project = std::path::Path::new(&pane.cwd)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "?".to_string());
+
+            let is_focused = i == self.focused;
+            let marker = if is_focused { "▶" } else { " " };
+
+            let line = Line::from(vec![
+                Span::styled(
+                    format!("  {marker} #{} ", i + 1),
+                    if is_focused {
+                        Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::DarkGray)
+                    },
+                ),
+                Span::styled("●", Style::default().fg(cli_color(pane.cli))),
+                Span::styled(
+                    format!(" {}", project),
+                    Style::default().fg(if is_focused { Color::White } else { Color::Gray }),
+                ),
+            ]);
+
+            let row = Rect { x: inner.x, y: row_y, width: inner.width, height: 1 };
+            frame.render_widget(Paragraph::new(line), row);
         }
     }
 
@@ -633,15 +740,50 @@ impl App {
     fn handle_mouse(&mut self, mouse: MouseEvent) {
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
-                // Check if click is in the sidebar area
-                if mouse.column < SIDEBAR_WIDTH {
-                    // Row 0 is status bar, row 1+ is sidebar content
-                    let sidebar_row = mouse.row.saturating_sub(2); // account for status bar + border
+                let (_, rows) = self.terminal_size;
+
+                // Click on bottom row — toggle bottom panel
+                if mouse.row >= rows.saturating_sub(2) {
+                    self.show_bottom_panel = !self.show_bottom_panel;
+                    return;
+                }
+
+                // Click on sidebar border — start drag
+                if mouse.column == self.sidebar_width || mouse.column == self.sidebar_width.saturating_sub(1) {
+                    self.sidebar_dragging = true;
+                    return;
+                }
+
+                // Click in sidebar — switch pane
+                if mouse.column < self.sidebar_width {
+                    let sidebar_row = mouse.row.saturating_sub(2);
                     let idx = sidebar_row as usize;
                     if idx < self.panes.len() {
                         self.focused = idx;
                     }
+                    return;
                 }
+
+                // Click in bottom panel session row — switch pane
+                if self.show_bottom_panel {
+                    let panel_start = rows.saturating_sub(2 + BOTTOM_PANEL_HEIGHT);
+                    if mouse.row > panel_start {
+                        let panel_row = mouse.row.saturating_sub(panel_start + 2);
+                        let idx = panel_row as usize;
+                        if idx < self.panes.len() {
+                            self.focused = idx;
+                        }
+                    }
+                }
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                if self.sidebar_dragging {
+                    let new_width = mouse.column.clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH);
+                    self.sidebar_width = new_width;
+                }
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                self.sidebar_dragging = false;
             }
             MouseEventKind::ScrollUp => {
                 if matches!(self.mode, Mode::Normal) {
@@ -762,7 +904,7 @@ impl App {
                 // Calculate pane size from current terminal size
                 let (cols, rows) = self.terminal_size;
                 let pane_rows = rows.saturating_sub(4); // status + border + command
-                let pane_cols = cols.saturating_sub(SIDEBAR_WIDTH + 2); // sidebar + borders
+                let pane_cols = cols.saturating_sub(self.sidebar_width + 2); // sidebar + borders
 
                 let id = self.panes.len();
                 match Pane::spawn(id, cli, &cwd, pane_rows.max(10), pane_cols.max(20)) {
@@ -839,7 +981,7 @@ impl App {
 
         // Calculate pane size: full height minus status+command, width minus sidebar
         let pane_rows = rows.saturating_sub(4); // status + border top + border bottom + command
-        let pane_cols = cols.saturating_sub(SIDEBAR_WIDTH + 2); // sidebar + border
+        let pane_cols = cols.saturating_sub(self.sidebar_width + 2); // sidebar + border
 
         for pane in &mut self.panes {
             let _ = pane.resize(pane_rows.max(1), pane_cols.max(1));
