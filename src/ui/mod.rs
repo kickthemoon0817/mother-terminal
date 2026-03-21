@@ -126,7 +126,13 @@ impl App {
             }
         }
 
-        // Cleanup
+        // Kill all panes to unblock reader threads
+        for pane in &mut self.panes {
+            pane.kill();
+        }
+        self.panes.clear();
+
+        // Cleanup terminal
         stdout().execute(DisableMouseCapture)?;
         terminal::disable_raw_mode()?;
         stdout().execute(LeaveAlternateScreen)?;
@@ -616,8 +622,8 @@ impl App {
                     self.last_ctrl_c = Some(Instant::now());
                 }
             }
-            // : or / enters command mode
-            (_, KeyCode::Char(':')) | (_, KeyCode::Char('/')) => {
+            // : enters mtt command mode (/ passes through to the pane for AI CLI slash commands)
+            (_, KeyCode::Char(':')) => {
                 self.mode = Mode::Command;
                 self.command_input.clear();
                 self.tab_matches.clear();
