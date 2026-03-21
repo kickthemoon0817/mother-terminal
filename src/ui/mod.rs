@@ -158,7 +158,6 @@ impl App {
             .constraints([
                 Constraint::Length(1), // status bar
                 Constraint::Min(1),   // main area
-                Constraint::Length(1), // command bar
             ])
             .split(size);
 
@@ -213,7 +212,10 @@ impl App {
             }
         }
 
-        self.draw_command_bar(frame, outer[2]);
+        // Floating command bar (only when in command mode)
+        if matches!(self.mode, Mode::Command) {
+            self.draw_floating_command(frame, size);
+        }
 
         // Help overlay (drawn last, on top of everything)
         if self.show_help {
@@ -614,65 +616,48 @@ impl App {
         // via the vt100 screen content (it draws its own cursor character)
     }
 
-    fn draw_command_bar(&self, frame: &mut Frame, area: Rect) {
-        let content = match &self.mode {
-            Mode::Normal => Line::from(vec![
-                Span::styled(
-                    " : ",
-                    Style::default().fg(Color::DarkGray),
-                ),
-                Span::styled(
-                    "command  ",
-                    Style::default().fg(Color::DarkGray),
-                ),
-                Span::styled(
-                    "Ctrl-N/P switch  Alt-1..9 jump",
-                    Style::default().fg(Color::Rgb(50, 50, 50)),
-                ),
-            ]),
-            Mode::Command => {
-                let mut spans = vec![
-                    Span::styled(
-                        " ❯ ",
-                        Style::default()
-                            .fg(Color::Cyan)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::raw(&self.command_input),
-                ];
+    fn draw_floating_command(&self, frame: &mut Frame, area: Rect) {
+        let width = (area.width / 2).max(40).min(area.width.saturating_sub(4));
+        let x = (area.width.saturating_sub(width)) / 2;
+        let y = area.height / 2;
 
-                // Show tab completion hint
-                if !self.tab_matches.is_empty() {
-                    let hint = &self.tab_matches[self.tab_index % self.tab_matches.len()];
-                    if hint.len() > self.command_input.len() {
-                        spans.push(Span::styled(
-                            &hint[self.command_input.len()..],
-                            Style::default().fg(Color::DarkGray),
-                        ));
-                    }
-                }
-
-                spans.push(Span::styled("█", Style::default().fg(Color::Cyan)));
-                Line::from(spans)
-            }
-            Mode::Scroll => Line::from(vec![
-                Span::styled(
-                    " SCROLL ",
-                    Style::default()
-                        .fg(Color::Black)
-                        .bg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    "  ↑↓ scroll  Esc exit  ",
-                    Style::default().fg(Color::DarkGray),
-                ),
-            ]),
+        let cmd_area = Rect {
+            x,
+            y,
+            width,
+            height: 3,
         };
 
-        let bar = Paragraph::new(content)
-            .style(Style::default().bg(Color::Rgb(25, 25, 25)));
-        frame.render_widget(bar, area);
+        let mut spans = vec![
+            Span::styled(
+                " ❯ ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(&self.command_input),
+        ];
+
+        // Tab completion hint
+        if !self.tab_matches.is_empty() {
+            let hint = &self.tab_matches[self.tab_index % self.tab_matches.len()];
+            if hint.len() > self.command_input.len() {
+                spans.push(Span::styled(
+                    &hint[self.command_input.len()..],
+                    Style::default().fg(Color::DarkGray),
+                ));
+            }
+        }
+
+        spans.push(Span::styled("█", Style::default().fg(Color::Cyan)));
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan))
+            .style(Style::default().bg(Color::Rgb(20, 20, 25)));
+
+        let para = Paragraph::new(Line::from(spans)).block(block);
+        frame.render_widget(para, cmd_area);
     }
 
     // ── Input handling ───────────────────────────────────────────────────
