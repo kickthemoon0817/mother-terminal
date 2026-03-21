@@ -847,21 +847,19 @@ impl App {
                 self.sidebar_dragging = false;
             }
             MouseEventKind::ScrollUp => {
-                // Enter scroll mode and scroll up
                 if matches!(self.mode, Mode::Normal) {
                     self.mode = Mode::Scroll;
                 }
                 if let Some(pane) = self.panes.get_mut(self.focused) {
-                    pane.scroll_offset = pane.scroll_offset.saturating_add(3);
+                    pane.scroll_offset = pane.scroll_offset.saturating_add(1);
                 }
             }
             MouseEventKind::ScrollDown => {
                 if let Some(pane) = self.panes.get_mut(self.focused) {
-                    if pane.scroll_offset <= 3 {
-                        pane.scroll_offset = 0;
+                    if pane.scroll_offset == 0 {
                         self.mode = Mode::Normal;
                     } else {
-                        pane.scroll_offset = pane.scroll_offset.saturating_sub(3);
+                        pane.scroll_offset = pane.scroll_offset.saturating_sub(1);
                     }
                 }
             }
@@ -954,22 +952,29 @@ impl App {
                         return;
                     }
                 };
-                let cwd = if parts.len() > 2 {
-                    let dir = parts[2..].join(" ");
-                    expand_path(&dir)
-                } else {
-                    std::env::current_dir()
+                // Parse remaining args: directory and CLI flags (--xxx)
+                let mut cwd = String::new();
+                let mut extra_args: Vec<&str> = Vec::new();
+                for part in &parts[2..] {
+                    if part.starts_with("--") {
+                        extra_args.push(part);
+                    } else if cwd.is_empty() {
+                        cwd = expand_path(part);
+                    }
+                }
+                if cwd.is_empty() {
+                    cwd = std::env::current_dir()
                         .map(|p| p.to_string_lossy().to_string())
-                        .unwrap_or_else(|_| ".".to_string())
-                };
+                        .unwrap_or_else(|_| ".".to_string());
+                }
 
                 // Calculate pane size from current terminal size
                 let (cols, rows) = self.terminal_size;
-                let pane_rows = rows.saturating_sub(4); // status + border + command
-                let pane_cols = cols.saturating_sub(self.sidebar_width + 2); // sidebar + borders
+                let pane_rows = rows.saturating_sub(4);
+                let pane_cols = cols.saturating_sub(self.sidebar_width + 2);
 
                 let id = self.panes.len();
-                match Pane::spawn(id, cli, &cwd, pane_rows.max(10), pane_cols.max(20)) {
+                match Pane::spawn(id, cli, &cwd, pane_rows.max(10), pane_cols.max(20), &extra_args) {
                     Ok(pane) => {
                         self.message =
                             format!("spawned {} in {}", cli.name(), short_path(&cwd));

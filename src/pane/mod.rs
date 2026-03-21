@@ -61,7 +61,8 @@ pub struct Pane {
 
 impl Pane {
     /// Spawn a new AI CLI process in a PTY.
-    pub fn spawn(id: usize, cli: CLIType, cwd: &str, rows: u16, cols: u16) -> Result<Self> {
+    /// `extra_args` are passed directly to the CLI (e.g., `--dangerously-skip-permissions`).
+    pub fn spawn(id: usize, cli: CLIType, cwd: &str, rows: u16, cols: u16, extra_args: &[&str]) -> Result<Self> {
         let pty_system = native_pty_system();
         let pair = pty_system.openpty(PtySize {
             rows,
@@ -71,6 +72,9 @@ impl Pane {
         })?;
 
         let mut cmd = CommandBuilder::new(cli.name());
+        for arg in extra_args {
+            cmd.arg(arg);
+        }
         cmd.cwd(cwd);
 
         let child = pair.slave.spawn_command(cmd)?;
