@@ -1,6 +1,9 @@
 #![deny(unsafe_code)]
 
+mod history;
+mod monitor;
 mod pane;
+mod persist;
 mod ui;
 
 use crate::ui::App;
