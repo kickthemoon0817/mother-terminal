@@ -17,6 +17,8 @@ use ratatui::{
 use std::io::stdout;
 use std::time::{Duration, Instant};
 
+use crate::history::Recorder as HistoryRecorder;
+use crate::monitor::StallDetector;
 use crate::pane::{CLIType, Pane, Status};
 use crate::persist;
 use crate::usage::UsageTracker;
@@ -71,6 +73,8 @@ pub struct App {
     show_session_picker: bool,
     picker_cursor: usize,
     usage: UsageTracker,
+    history: Option<HistoryRecorder>,
+    stall: StallDetector,
 }
 
 impl App {
@@ -96,6 +100,8 @@ impl App {
             show_session_picker: false,
             picker_cursor: 0,
             usage: UsageTracker::load(),
+            history: HistoryRecorder::new().ok(),
+            stall: StallDetector::new(),
         }
     }
 
@@ -121,9 +127,27 @@ impl App {
                     self.message.clear();
                 }
 
-            // Poll PTY output from all panes
+            // Poll PTY output, record history, check stalls
             for pane in &mut self.panes {
-                pane.poll_output();
+                if pane.poll_output() {
+                    // Record history
+                    let text = pane.screen_text();
+                    if let Some(ref recorder) = self.history {
+                        let name = format!("{}_{}", pane.cli.name(), pane.id);
+                        let _ = recorder.record(&name, &text);
+                    }
+                    // Check for stalls
+                    let stall = self.stall.check(&format!("{}", pane.id), &text);
+                    if let crate::monitor::StallStatus::Stalled { .. } = stall {
+                        pane.status = Status::Stalled;
+                    } else if pane.status == Status::Stalled {
+                        pane.status = Status::Active;
+                    }
+                }
+                // Check if process died
+                if !pane.is_alive() && pane.status != Status::Dead {
+                    pane.status = Status::Dead;
+                }
             }
 
             // Draw UI
@@ -285,6 +309,15 @@ impl App {
             spans.push(Span::styled(
                 short_path(&pane.cwd),
                 Style::default().fg(Color::Gray),
+            ));
+            // Session uptime
+            let uptime = pane.started.elapsed();
+            let mins = uptime.as_secs() / 60;
+            let hrs = mins / 60;
+            let m = mins % 60;
+            spans.push(Span::styled(
+                if hrs > 0 { format!("  {hrs}h{m:02}m") } else { format!("  {m}m") },
+                Style::default().fg(Color::DarkGray),
             ));
         }
 
@@ -933,7 +966,6 @@ impl App {
             // Ctrl-Q: save sessions and quit
             (KeyModifiers::CONTROL, KeyCode::Char('q')) => {
                 self.save_and_quit();
-                return;
             }
             // Ctrl-C: context-aware
             (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
@@ -1391,6 +1423,7 @@ impl App {
                 };
                 if let Some(idx) = target {
                     self.usage.end_session(self.panes[idx].cli.name());
+                    self.stall.remove(&format!("{}", self.panes[idx].id));
                     self.panes[idx].kill();
                     self.panes.remove(idx);
                     if self.focused >= self.panes.len() && !self.panes.is_empty() {
@@ -1432,6 +1465,35 @@ impl App {
                     self.show_session_picker = true;
                 } else {
                     self.message = "no sessions".to_string();
+                }
+            }
+
+            "history" => {
+                if let Some(ref recorder) = self.history {
+                    if parts.len() > 1 && parts[1] == "search" {
+                        let query = parts[2..].join(" ");
+                        match recorder.search(&query) {
+                            Ok(results) => {
+                                if results.is_empty() {
+                                    self.message = format!("no results for '{query}'");
+                                } else {
+                                    let lines: Vec<String> = results.iter().take(5).map(|r| {
+                                        format!("[{}:{}] {}", r.session, r.line_number, &r.content[..r.content.len().min(50)])
+                                    }).collect();
+                                    self.message = lines.join(" | ");
+                                }
+                            }
+                            Err(e) => self.message = format!("search error: {e}"),
+                        }
+                    } else if let Some(pane) = self.panes.get(self.focused) {
+                        let name = format!("{}_{}", pane.cli.name(), pane.id);
+                        match recorder.get_history(&name, 20) {
+                            Ok(lines) => self.message = lines.join("\n"),
+                            Err(e) => self.message = format!("history error: {e}"),
+                        }
+                    }
+                } else {
+                    self.message = "history not available".to_string();
                 }
             }
 

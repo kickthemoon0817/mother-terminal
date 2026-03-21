@@ -3,38 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-
-/// Per-CLI usage limits.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CLILimits {
-    pub daily_hours: f64,       // 5h window
-    pub weekly_hours: f64,      // weekly cap (0 = no limit)
-}
-
-impl CLILimits {
-    pub fn claude() -> Self {
-        Self { daily_hours: 5.0, weekly_hours: 35.0 }
-    }
-    pub fn codex() -> Self {
-        Self { daily_hours: 5.0, weekly_hours: 0.0 } // 0 = unknown/no cap
-    }
-    pub fn gemini() -> Self {
-        Self { daily_hours: 4.0, weekly_hours: 0.0 }
-    }
-    pub fn opencode() -> Self {
-        Self { daily_hours: 0.0, weekly_hours: 0.0 } // no tracking
-    }
-
-    pub fn for_cli(name: &str) -> Self {
-        match name {
-            "claude" => Self::claude(),
-            "codex" => Self::codex(),
-            "gemini" => Self::gemini(),
-            _ => Self::opencode(),
-        }
-    }
-}
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// A recorded usage session (start time + duration in seconds).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -160,63 +129,23 @@ impl UsageTracker {
         total
     }
 
-    /// Get remaining daily time for a CLI.
-    pub fn daily_remaining(&self, cli: &str) -> Duration {
-        let limits = CLILimits::for_cli(cli);
-        if limits.daily_hours <= 0.0 {
-            return Duration::from_secs(0);
-        }
-        let limit_secs = (limits.daily_hours * 3600.0) as u64;
-        let used = self.today_secs(cli);
-        Duration::from_secs(limit_secs.saturating_sub(used))
-    }
-
-    /// Get remaining weekly time for a CLI.
-    pub fn weekly_remaining(&self, cli: &str) -> Duration {
-        let limits = CLILimits::for_cli(cli);
-        if limits.weekly_hours <= 0.0 {
-            return Duration::from_secs(0);
-        }
-        let limit_secs = (limits.weekly_hours * 3600.0) as u64;
-        let used = self.week_secs(cli);
-        Duration::from_secs(limit_secs.saturating_sub(used))
-    }
-
-    /// Format usage for display: "5h:42%(2h54m) wk:15%(29h45m)"
+    /// Format usage for display: "2h09m today  12h35m week"
     pub fn format_usage(&self, cli: &str) -> String {
-        let limits = CLILimits::for_cli(cli);
-        if limits.daily_hours <= 0.0 {
-            return "—".to_string();
-        }
+        let daily = self.today_secs(cli);
+        let weekly = self.week_secs(cli);
 
-        let daily_limit = (limits.daily_hours * 3600.0) as u64;
-        let daily_used = self.today_secs(cli);
-        let daily_pct = if daily_limit > 0 {
-            (daily_used * 100 / daily_limit).min(100)
+        let dh = daily / 3600;
+        let dm = (daily % 3600) / 60;
+        let wh = weekly / 3600;
+        let wm = (weekly % 3600) / 60;
+
+        if weekly > 0 {
+            format!("{dh}h{dm:02}m today {wh}h{wm:02}m week")
+        } else if daily > 0 {
+            format!("{dh}h{dm:02}m today")
         } else {
-            0
-        };
-        let daily_rem = daily_limit.saturating_sub(daily_used);
-        let dr_h = daily_rem / 3600;
-        let dr_m = (daily_rem % 3600) / 60;
-
-        let mut s = format!("{}h:{}%({}h{:02}m)", limits.daily_hours as u32, daily_pct, dr_h, dr_m);
-
-        if limits.weekly_hours > 0.0 {
-            let weekly_limit = (limits.weekly_hours * 3600.0) as u64;
-            let weekly_used = self.week_secs(cli);
-            let weekly_pct = if weekly_limit > 0 {
-                (weekly_used * 100 / weekly_limit).min(100)
-            } else {
-                0
-            };
-            let wr = weekly_limit.saturating_sub(weekly_used);
-            let wr_d = wr / 86400;
-            let wr_h = (wr % 86400) / 3600;
-            s.push_str(&format!(" wk:{}%({}d{}h)", weekly_pct, wr_d, wr_h));
+            "0m".to_string()
         }
-
-        s
     }
 
     /// Prune entries older than 7 days to keep file small.
