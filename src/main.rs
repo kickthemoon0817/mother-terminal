@@ -5,6 +5,7 @@ mod monitor;
 mod pane;
 mod persist;
 mod ui;
+mod usage;
 
 use crate::ui::App;
 

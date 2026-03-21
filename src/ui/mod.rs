@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 
 use crate::pane::{CLIType, Pane, Status};
 use crate::persist;
+use crate::usage::UsageTracker;
 
 const DEFAULT_SIDEBAR_WIDTH: u16 = 20;
 const MIN_SIDEBAR_WIDTH: u16 = 12;
@@ -69,6 +70,7 @@ pub struct App {
     show_help: bool,
     show_session_picker: bool,
     picker_cursor: usize,
+    usage: UsageTracker,
 }
 
 impl App {
@@ -93,6 +95,7 @@ impl App {
             show_help: false,
             show_session_picker: false,
             picker_cursor: 0,
+            usage: UsageTracker::load(),
         }
     }
 
@@ -477,40 +480,26 @@ impl App {
 
         let mut spans: Vec<Span> = vec![Span::raw(" ")];
 
-        for (cli, name, limit_h) in [
-            (CLIType::Claude, "claude", 5u32),
-            (CLIType::Codex, "codex", 5u32),
-            (CLIType::Gemini, "gemini", 4u32),
+        for (cli, name) in [
+            (CLIType::Claude, "claude"),
+            (CLIType::Codex, "codex"),
+            (CLIType::Gemini, "gemini"),
         ] {
             let count = self.panes.iter().filter(|p| p.cli == cli).count();
-            // Simple usage estimate based on session age
-            let total_mins: u64 = self.panes
-                .iter()
-                .filter(|p| p.cli == cli && p.status == Status::Active)
-                .map(|p| p.started.elapsed().as_secs() / 60)
-                .sum();
-            let limit_mins = limit_h as u64 * 60;
-            let remaining_mins = limit_mins.saturating_sub(total_mins);
-            let pct = if limit_mins > 0 {
-                ((limit_mins - remaining_mins) * 100 / limit_mins) as u32
-            } else {
-                0
-            };
-            let rem_h = remaining_mins / 60;
-            let rem_m = remaining_mins % 60;
+            let usage_str = self.usage.format_usage(name);
 
             spans.push(Span::styled(
                 "● ".to_string(),
                 Style::default().fg(cli_color(cli)),
             ));
             spans.push(Span::styled(
-                format!("{name} {limit_h}h:{pct}%({rem_h}h{rem_m:02}m)"),
+                format!("{name} {usage_str}"),
                 Style::default().fg(Color::Gray),
             ));
             if count > 0 {
                 spans.push(Span::styled(
                     format!(" [{count}]"),
-                    Style::default().fg(Color::Gray),
+                    Style::default().fg(Color::White),
                 ));
             }
             spans.push(sep.clone());
@@ -550,7 +539,7 @@ impl App {
             let count = self.panes.iter().filter(|p| p.cli == cli && p.status == Status::Active).count();
             if count > 0 {
                 spans.push(Span::styled(
-                    format!("●{name}({count})"),
+                    format!("● {name}({count})"),
                     Style::default().fg(cli_color(cli)),
                 ));
                 spans.push(sep.clone());
@@ -956,6 +945,7 @@ impl App {
                 if !self.panes.is_empty() && self.focused < self.panes.len() {
                     if self.panes[self.focused].status == Status::Active {
                         if double {
+                            self.usage.end_session(self.panes[self.focused].cli.name());
                             self.panes[self.focused].kill();
                             self.panes.remove(self.focused);
                             if self.focused >= self.panes.len() && !self.panes.is_empty() {
@@ -969,6 +959,7 @@ impl App {
                             self.last_ctrl_c = Some(Instant::now());
                         }
                     } else if double {
+                        self.usage.end_session(self.panes[self.focused].cli.name());
                         self.panes[self.focused].kill();
                         self.panes.remove(self.focused);
                         if self.focused >= self.panes.len() && !self.panes.is_empty() {
@@ -1075,6 +1066,16 @@ impl App {
             }
             KeyCode::Tab => {
                 self.apply_tab_completion();
+            }
+            KeyCode::Down => {
+                // Down arrow opens session picker (bottom layout)
+                if self.panel_position == PanelPosition::Bottom && !self.panes.is_empty() {
+                    self.picker_cursor = self.focused;
+                    self.show_session_picker = true;
+                    self.mode = Mode::Normal;
+                    self.command_input.clear();
+                    self.tab_matches.clear();
+                }
             }
             KeyCode::Left => {
                 // Left arrow enters sidebar navigation (left layout only)
@@ -1368,6 +1369,7 @@ impl App {
                     Ok(mut pane) => {
                         // Ensure PTY gets the correct size immediately
                         let _ = pane.resize(pane_rows.max(1), pane_cols.max(1));
+                        self.usage.start_session(cli.name());
                         self.message =
                             format!("spawned {} in {}", cli.name(), short_path(&cwd));
                         self.panes.push(pane);
@@ -1388,6 +1390,7 @@ impl App {
                     None
                 };
                 if let Some(idx) = target {
+                    self.usage.end_session(self.panes[idx].cli.name());
                     self.panes[idx].kill();
                     self.panes.remove(idx);
                     if self.focused >= self.panes.len() && !self.panes.is_empty() {
@@ -1467,6 +1470,12 @@ impl App {
             })
             .collect();
         let _ = persist::save_sessions(&sessions);
+
+        // End all usage sessions and save
+        self.usage.end_all();
+        self.usage.prune_old();
+        let _ = self.usage.save();
+
         self.should_quit = true;
     }
 
@@ -1489,6 +1498,7 @@ impl App {
             match Pane::spawn(id, cli, &info.cwd, pane_rows.max(10), pane_cols.max(20), &[]) {
                 Ok(mut pane) => {
                     let _ = pane.resize(pane_rows.max(1), pane_cols.max(1));
+                    self.usage.start_session(pane.cli.name());
                     self.panes.push(pane);
                 }
                 Err(_) => continue,
