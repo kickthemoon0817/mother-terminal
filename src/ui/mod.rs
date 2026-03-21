@@ -12,7 +12,7 @@ use ratatui::{
     Frame, Terminal,
 };
 use std::io::stdout;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::pane::{CLIType, Pane, Status};
 
@@ -32,6 +32,7 @@ pub struct App {
     history_cursor: usize,
     message: String,
     should_quit: bool,
+    last_ctrl_c: Option<std::time::Instant>,
 }
 
 impl App {
@@ -45,6 +46,7 @@ impl App {
             history_cursor: 0,
             message: String::new(),
             should_quit: false,
+            last_ctrl_c: None,
         }
     }
 
@@ -303,20 +305,11 @@ impl App {
             }
         }
 
-        // Render cursor
-        if is_focused && !screen.hide_cursor() {
+        // Position the real terminal cursor at the vt100 cursor location
+        if is_focused {
             let (cursor_row, cursor_col) = screen.cursor_position();
             if cursor_row < inner.height && cursor_col < inner.width {
-                let buf = frame.buffer_mut();
-                if let Some(buf_cell) =
-                    buf.cell_mut((inner.x + cursor_col, inner.y + cursor_row))
-                {
-                    buf_cell.set_style(
-                        Style::default()
-                            .bg(Color::White)
-                            .fg(Color::Black),
-                    );
-                }
+                frame.set_cursor_position((inner.x + cursor_col, inner.y + cursor_row));
             }
         }
     }
@@ -350,10 +343,53 @@ impl App {
     }
 
     fn handle_normal_key(&mut self, key: KeyEvent) {
+        // Reset Ctrl+C timer on any other key
+        if key.code != KeyCode::Char('c') || key.modifiers != KeyModifiers::CONTROL {
+            self.last_ctrl_c = None;
+        }
+
         match (key.modifiers, key.code) {
-            // Ctrl-C: quit
+            // Ctrl-C: context-aware
             (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
-                self.should_quit = true;
+                let double = self
+                    .last_ctrl_c
+                    .map(|t| t.elapsed() < Duration::from_millis(500))
+                    .unwrap_or(false);
+
+                if let Some(pane) = self.panes.get_mut(self.focused) {
+                    if pane.status == Status::Active {
+                        if double {
+                            // Double Ctrl+C on active pane → kill session
+                            pane.kill();
+                            self.message = format!("killed session {}", self.focused + 1);
+                            self.last_ctrl_c = None;
+                        } else {
+                            // Single Ctrl+C → send interrupt to AI CLI
+                            let _ = pane.send_keys(&[0x03]); // ETX = Ctrl+C
+                            self.message = "interrupt sent (Ctrl+C again to kill)".to_string();
+                            self.last_ctrl_c = Some(Instant::now());
+                        }
+                    } else {
+                        // Pane is dead/stalled — double Ctrl+C to remove
+                        if double {
+                            pane.kill();
+                            self.message = format!("killed session {}", self.focused + 1);
+                            self.last_ctrl_c = None;
+                        } else {
+                            self.message = "Ctrl+C again to kill session".to_string();
+                            self.last_ctrl_c = Some(Instant::now());
+                        }
+                    }
+                } else {
+                    // No panes — double Ctrl+C to quit mtt
+                    if double {
+                        self.should_quit = true;
+                    } else {
+                        self.message = "Ctrl+C again to quit mtt".to_string();
+                        self.last_ctrl_c = Some(Instant::now());
+                    }
+                }
+                return;
             }
             // : or / enters command mode
             (_, KeyCode::Char(':')) | (_, KeyCode::Char('/')) => {
