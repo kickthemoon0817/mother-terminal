@@ -794,14 +794,15 @@ impl App {
             if src_row >= render_rows {
                 break;
             }
-            for col in 0..inner.width.min(render_cols) {
+            let mut col: u16 = 0;
+            while col < inner.width.min(render_cols) {
                 if let Some(cell) = render_screen.cell(src_row, col) {
                     let ch = cell.contents();
                     let fg = convert_vt100_color(cell.fgcolor());
                     let bg = convert_vt100_color(cell.bgcolor());
 
-                    // Skip truly empty cells (no content AND no background)
                     if ch.is_empty() && bg == Color::Reset {
+                        col += 1;
                         continue;
                     }
                     let mut style = Style::default();
@@ -826,6 +827,12 @@ impl App {
                         buf_cell.set_symbol(&ch);
                         buf_cell.set_style(style);
                     }
+
+                    // Wide characters (Korean/CJK) take 2 columns
+                    let w = if ch.chars().any(|c| is_wide_char(c)) { 2 } else { 1 };
+                    col += w;
+                } else {
+                    col += 1;
                 }
             }
         }
@@ -1352,7 +1359,9 @@ impl App {
 
                 let id = self.panes.len();
                 match Pane::spawn(id, cli, &cwd, pane_rows.max(10), pane_cols.max(20), &extra_args) {
-                    Ok(pane) => {
+                    Ok(mut pane) => {
+                        // Ensure PTY gets the correct size immediately
+                        let _ = pane.resize(pane_rows.max(1), pane_cols.max(1));
                         self.message =
                             format!("spawned {} in {}", cli.name(), short_path(&cwd));
                         self.panes.push(pane);
@@ -1602,6 +1611,20 @@ fn get_dir_completions_inner(dir: &str, file_prefix: &str, original: &str) -> Ve
 
     results.sort();
     results
+}
+
+fn is_wide_char(c: char) -> bool {
+    let cp = c as u32;
+    (0x1100..=0x115F).contains(&cp)    // Hangul Jamo
+    || (0x2E80..=0x303E).contains(&cp) // CJK Radicals
+    || (0x3040..=0x33BF).contains(&cp) // Hiragana, Katakana
+    || (0x3400..=0x4DBF).contains(&cp) // CJK Ext A
+    || (0x4E00..=0x9FFF).contains(&cp) // CJK Unified
+    || (0xAC00..=0xD7AF).contains(&cp) // Hangul Syllables
+    || (0xF900..=0xFAFF).contains(&cp) // CJK Compat
+    || (0xFE30..=0xFE4F).contains(&cp) // CJK Forms
+    || (0xFF00..=0xFF60).contains(&cp) // Fullwidth
+    || (0x20000..=0x2FA1F).contains(&cp) // CJK Ext B+
 }
 
 fn cli_color(cli: CLIType) -> Color {
