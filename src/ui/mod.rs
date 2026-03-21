@@ -792,10 +792,22 @@ impl App {
             MouseEventKind::Up(MouseButton::Left) => {
                 self.sidebar_dragging = false;
             }
-            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
-                // Don't forward scroll to pane (arrow keys cycle input history).
-                // Scroll events are ignored in Normal mode — AI CLIs handle
-                // their own output scrolling internally.
+            MouseEventKind::ScrollUp => {
+                // Forward as SGR mouse scroll to focused pane
+                if let Some(pane) = self.panes.get_mut(self.focused) {
+                    let col = mouse.column.saturating_sub(self.sidebar_width + 1) + 1;
+                    let row = mouse.row.saturating_sub(1) + 1;
+                    let seq = format!("\x1b[<64;{col};{row}M");
+                    let _ = pane.send_keys(seq.as_bytes());
+                }
+            }
+            MouseEventKind::ScrollDown => {
+                if let Some(pane) = self.panes.get_mut(self.focused) {
+                    let col = mouse.column.saturating_sub(self.sidebar_width + 1) + 1;
+                    let row = mouse.row.saturating_sub(1) + 1;
+                    let seq = format!("\x1b[<65;{col};{row}M");
+                    let _ = pane.send_keys(seq.as_bytes());
+                }
             }
             _ => {}
         }
