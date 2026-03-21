@@ -34,9 +34,10 @@ const CLI_NAMES: &[&str] = &["claude", "codex", "gemini", "opencode"];
 
 /// UI mode.
 enum Mode {
-    Normal,   // pane focused, keys go to AI CLI
-    Command,  // typing a command in the command bar
-    Scroll,   // scrolling through pane scrollback
+    Normal,      // pane focused, keys go to AI CLI
+    Command,     // typing a command in the command bar
+    Scroll,      // scrolling through pane scrollback
+    SidebarNav,  // navigating the sidebar to switch sessions
 }
 
 /// Session panel position.
@@ -329,6 +330,7 @@ impl App {
             }
 
             let is_focused = i == self.focused;
+            let is_nav_cursor = matches!(self.mode, Mode::SidebarNav) && i == self.picker_cursor;
 
             let status_icon = match pane.status {
                 Status::Active => "●",
@@ -346,7 +348,9 @@ impl App {
             let line = Line::from(vec![
                 Span::styled(
                     format!(" {}", i + 1),
-                    if is_focused {
+                    if is_nav_cursor {
+                        Style::default().fg(Color::Rgb(120, 80, 170)).add_modifier(Modifier::BOLD)
+                    } else if is_focused {
                         Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
                     } else {
                         Style::default().fg(Color::DarkGray)
@@ -379,7 +383,9 @@ impl App {
                 height: 1,
             };
 
-            let bg = if is_focused {
+            let bg = if is_nav_cursor {
+                Style::default().bg(Color::Rgb(50, 30, 70))
+            } else if is_focused {
                 Style::default().bg(Color::Rgb(40, 40, 40))
             } else {
                 Style::default()
@@ -917,6 +923,7 @@ impl App {
             Mode::Normal => self.handle_normal_key(key),
             Mode::Command => self.handle_command_key(key),
             Mode::Scroll => self.handle_scroll_key(key),
+            Mode::SidebarNav => self.handle_sidebar_nav_key(key),
         }
     }
 
@@ -1056,8 +1063,16 @@ impl App {
             KeyCode::Tab => {
                 self.apply_tab_completion();
             }
+            KeyCode::Left => {
+                // Left arrow enters sidebar navigation (left layout only)
+                if self.panel_position == PanelPosition::Left && !self.panes.is_empty() {
+                    self.mode = Mode::SidebarNav;
+                    self.picker_cursor = self.focused;
+                    self.command_input.clear();
+                    self.tab_matches.clear();
+                }
+            }
             KeyCode::F(2) => {
-                // F2 opens session picker from command mode
                 if !self.panes.is_empty() {
                     self.picker_cursor = self.focused;
                     self.show_session_picker = true;
@@ -1070,6 +1085,32 @@ impl App {
                 self.update_tab_matches();
             }
             _ => {}
+        }
+    }
+
+    fn handle_sidebar_nav_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                if self.picker_cursor > 0 {
+                    self.picker_cursor -= 1;
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if self.picker_cursor + 1 < self.panes.len() {
+                    self.picker_cursor += 1;
+                }
+            }
+            KeyCode::Enter => {
+                self.focused = self.picker_cursor;
+                self.mode = Mode::Normal;
+            }
+            KeyCode::Right | KeyCode::Esc => {
+                // Right arrow or Esc goes back to normal mode
+                self.mode = Mode::Normal;
+            }
+            _ => {
+                self.mode = Mode::Normal;
+            }
         }
     }
 
