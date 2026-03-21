@@ -65,6 +65,8 @@ pub struct App {
     show_bottom_panel: bool,
     panel_position: PanelPosition,
     show_help: bool,
+    show_session_picker: bool,
+    picker_cursor: usize,
 }
 
 impl App {
@@ -87,6 +89,8 @@ impl App {
             show_bottom_panel: false,
             panel_position: PanelPosition::Left,
             show_help: false,
+            show_session_picker: false,
+            picker_cursor: 0,
         }
     }
 
@@ -214,6 +218,11 @@ impl App {
         // Floating command bar (only when in command mode)
         if matches!(self.mode, Mode::Command) {
             self.draw_floating_command(frame, size);
+        }
+
+        // Session picker overlay
+        if self.show_session_picker {
+            self.draw_session_picker(frame, size);
         }
 
         // Help overlay (drawn last, on top of everything)
@@ -454,13 +463,87 @@ impl App {
     }
 
     fn draw_session_tab_bar(&self, frame: &mut Frame, area: Rect) {
-        let mut spans = vec![
-            Span::styled("─", Style::default().fg(Color::DarkGray)),
-            Span::raw(" "),
-        ];
+        let sep = Span::styled(" │ ", Style::default().fg(Color::DarkGray));
+
+        let mut spans: Vec<Span> = vec![Span::raw(" ")];
+
+        // Per-CLI usage limits
+        for (cli, name) in [
+            (CLIType::Claude, "claude"),
+            (CLIType::Codex, "codex"),
+            (CLIType::Gemini, "gemini"),
+        ] {
+            let count = self.panes.iter().filter(|p| p.cli == cli && p.status == Status::Active).count();
+            if count > 0 {
+                spans.push(Span::styled(
+                    format!("●{name}({count})"),
+                    Style::default().fg(cli_color(cli)),
+                ));
+                spans.push(sep.clone());
+            }
+        }
+
+        // Session count + hint
+        let active = self.panes.iter().filter(|p| p.status == Status::Active).count();
+        spans.push(Span::styled(
+            format!("{active} active"),
+            Style::default().fg(Color::Green),
+        ));
+        spans.push(sep.clone());
+
+        // Focused session indicator
+        if let Some(pane) = self.panes.get(self.focused) {
+            let project = std::path::Path::new(&pane.cwd)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "?".to_string());
+            spans.push(Span::styled(
+                format!("▶ {}", project),
+                Style::default().fg(cli_color(pane.cli)).add_modifier(Modifier::BOLD),
+            ));
+        }
+
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(
+            "sessions ↓",
+            Style::default().fg(Color::DarkGray),
+        ));
+
+        let bar = Paragraph::new(Line::from(spans))
+            .style(Style::default().bg(Color::Rgb(25, 25, 25)));
+        frame.render_widget(bar, area);
+    }
+
+    fn draw_session_picker(&self, frame: &mut Frame, area: Rect) {
+        if self.panes.is_empty() {
+            return;
+        }
+
+        let width = 40u16.min(area.width.saturating_sub(4));
+        let height = (self.panes.len() as u16 + 2).min(area.height.saturating_sub(4));
+        let x = (area.width.saturating_sub(width)) / 2;
+        let y = area.height.saturating_sub(height + 3);
+
+        let picker_area = Rect { x, y, width, height };
+
+        let block = Block::default()
+            .borders(Borders::TOP | Borders::BOTTOM)
+            .border_style(Style::default().fg(Color::DarkGray))
+            .style(Style::default().bg(Color::Rgb(20, 20, 25)));
+
+        let inner = block.inner(picker_area);
+        frame.render_widget(block, picker_area);
 
         for (i, pane) in self.panes.iter().enumerate() {
-            let is_focused = i == self.focused;
+            if i as u16 >= inner.height {
+                break;
+            }
+
+            let is_selected = i == self.picker_cursor;
+            let project = std::path::Path::new(&pane.cwd)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "?".to_string());
 
             let status_icon = match pane.status {
                 Status::Active => "●",
@@ -468,34 +551,52 @@ impl App {
                 Status::Dead => "✕",
             };
 
-            let project = std::path::Path::new(&pane.cwd)
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| "?".to_string());
+            let marker = if is_selected { "▶" } else { " " };
 
-            let label = format!("{status_icon} {}", truncate_str(&project, 12));
+            let line = Line::from(vec![
+                Span::styled(
+                    format!(" {marker} {}", i + 1),
+                    if is_selected {
+                        Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::DarkGray)
+                    },
+                ),
+                Span::styled(
+                    format!(" {status_icon}"),
+                    Style::default().fg(match pane.status {
+                        Status::Active => Color::Green,
+                        Status::Stalled => Color::Yellow,
+                        Status::Dead => Color::Red,
+                    }),
+                ),
+                Span::styled(
+                    format!(" {} ", pane.cli.name()),
+                    Style::default().fg(cli_color(pane.cli)),
+                ),
+                Span::styled(
+                    truncate_str(&project, 20),
+                    if is_selected {
+                        Style::default().fg(Color::White)
+                    } else {
+                        Style::default().fg(Color::Gray)
+                    },
+                ),
+            ]);
 
-            if is_focused {
-                spans.push(Span::styled(
-                    format!(" {label} "),
-                    Style::default()
-                        .fg(Color::Black)
-                        .bg(cli_color(pane.cli))
-                        .add_modifier(Modifier::BOLD),
-                ));
+            let row = Rect {
+                x: inner.x,
+                y: inner.y + i as u16,
+                width: inner.width,
+                height: 1,
+            };
+            let bg = if is_selected {
+                Style::default().bg(Color::Rgb(40, 40, 50))
             } else {
-                spans.push(Span::styled(
-                    format!(" {label} "),
-                    Style::default().fg(Color::Gray),
-                ));
-            }
-
-            spans.push(Span::styled(" │ ", Style::default().fg(Color::DarkGray)));
+                Style::default()
+            };
+            frame.render_widget(Paragraph::new(line).style(bg), row);
         }
-
-        let bar = Paragraph::new(Line::from(spans))
-            .style(Style::default().bg(Color::Rgb(25, 25, 25)));
-        frame.render_widget(bar, area);
     }
 
     fn draw_help_overlay(&self, frame: &mut Frame, area: Rect) {
@@ -713,6 +814,35 @@ impl App {
             return;
         }
 
+        // Session picker navigation
+        if self.show_session_picker {
+            match key.code {
+                KeyCode::Esc => {
+                    self.show_session_picker = false;
+                }
+                KeyCode::Up => {
+                    if self.picker_cursor > 0 {
+                        self.picker_cursor -= 1;
+                    } else {
+                        self.show_session_picker = false;
+                    }
+                }
+                KeyCode::Down => {
+                    if self.picker_cursor + 1 < self.panes.len() {
+                        self.picker_cursor += 1;
+                    }
+                }
+                KeyCode::Enter => {
+                    self.focused = self.picker_cursor;
+                    self.show_session_picker = false;
+                }
+                _ => {
+                    self.show_session_picker = false;
+                }
+            }
+            return;
+        }
+
         match &self.mode {
             Mode::Normal => self.handle_normal_key(key),
             Mode::Command => self.handle_command_key(key),
@@ -765,6 +895,13 @@ impl App {
                 } else {
                     self.message = "Ctrl+C again to quit mtt".to_string();
                     self.last_ctrl_c = Some(Instant::now());
+                }
+            }
+            // Down arrow opens session picker (bottom layout only)
+            (KeyModifiers::CONTROL, KeyCode::Char('j')) => {
+                if !self.panes.is_empty() {
+                    self.picker_cursor = self.focused;
+                    self.show_session_picker = true;
                 }
             }
             // : enters mtt command mode (/ passes through to the pane for AI CLI slash commands)
