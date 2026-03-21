@@ -349,23 +349,10 @@ impl App {
         let screen = pane.screen();
         let (screen_rows, screen_cols) = screen.size();
 
-        // Apply scroll offset in scroll mode
-        let row_offset = if matches!(self.mode, Mode::Scroll) && is_focused {
-            self.scroll_offset
-        } else {
-            0
-        };
-
+        // Render screen content (visible screen only — scrollback TBD)
         for row in 0..inner.height.min(screen_rows) {
-            let src_row = if row_offset > 0 {
-                // Scrollback: read from earlier in the buffer
-                row.saturating_sub(row_offset)
-            } else {
-                row
-            };
-
             for col in 0..inner.width.min(screen_cols) {
-                if let Some(cell) = screen.cell(src_row, col) {
+                if let Some(cell) = screen.cell(row, col) {
                     let ch = cell.contents();
                     if ch.is_empty() {
                         continue;
@@ -399,13 +386,8 @@ impl App {
             }
         }
 
-        // Position cursor (not in scroll mode)
-        if is_focused && !matches!(self.mode, Mode::Scroll) {
-            let (cursor_row, cursor_col) = screen.cursor_position();
-            if cursor_row < inner.height && cursor_col < inner.width {
-                frame.set_cursor_position((inner.x + cursor_col, inner.y + cursor_row));
-            }
-        }
+        // Hide the hardware cursor — let the AI CLI render its own cursor
+        // via the vt100 screen content (it draws its own cursor character)
     }
 
     fn draw_command_bar(&self, frame: &mut Frame, area: Rect) {
