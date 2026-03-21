@@ -210,6 +210,22 @@ impl Pane {
         Some(tall_parser)
     }
 
+    /// Get the maximum scroll offset based on raw history content.
+    pub fn max_scroll(&self, visible_rows: u16, cols: u16) -> usize {
+        let hist = match self.raw_history.lock() {
+            Ok(h) => h,
+            Err(_) => return 0,
+        };
+        if hist.is_empty() {
+            return 0;
+        }
+        let tall_rows = visible_rows.saturating_mul(10).max(500);
+        let mut parser = vt100::Parser::new(tall_rows, cols, 0);
+        parser.process(&hist);
+        let (cursor_row, _) = parser.screen().cursor_position();
+        cursor_row.saturating_sub(visible_rows) as usize
+    }
+
     /// Kill the child process and reap it to prevent zombies.
     pub fn kill(&mut self) {
         let _ = self.child.kill();

@@ -759,7 +759,10 @@ impl App {
             }
             KeyCode::Up | KeyCode::Char('k') => {
                 if let Some(pane) = self.panes.get_mut(self.focused) {
-                    pane.scroll_offset = pane.scroll_offset.saturating_add(1);
+                    let (cols, rows) = self.terminal_size;
+                    let visible = rows.saturating_sub(4);
+                    let max = pane.max_scroll(visible, cols.saturating_sub(self.sidebar_width + 2));
+                    pane.scroll_offset = (pane.scroll_offset + 1).min(max);
                 }
             }
             KeyCode::Down | KeyCode::Char('j') => {
@@ -774,7 +777,10 @@ impl App {
             }
             KeyCode::PageUp => {
                 if let Some(pane) = self.panes.get_mut(self.focused) {
-                    pane.scroll_offset = pane.scroll_offset.saturating_add(20);
+                    let (cols, rows) = self.terminal_size;
+                    let visible = rows.saturating_sub(4);
+                    let max = pane.max_scroll(visible, cols.saturating_sub(self.sidebar_width + 2));
+                    pane.scroll_offset = (pane.scroll_offset + 20).min(max);
                 }
             }
             KeyCode::PageDown => {
@@ -851,7 +857,10 @@ impl App {
                     self.mode = Mode::Scroll;
                 }
                 if let Some(pane) = self.panes.get_mut(self.focused) {
-                    pane.scroll_offset = pane.scroll_offset.saturating_add(1);
+                    let (_, rows) = self.terminal_size;
+                    let visible = rows.saturating_sub(4);
+                    let max = pane.max_scroll(visible, self.terminal_size.0.saturating_sub(self.sidebar_width + 2));
+                    pane.scroll_offset = (pane.scroll_offset + 1).min(max);
                 }
             }
             MouseEventKind::ScrollDown => {
@@ -952,13 +961,14 @@ impl App {
                         return;
                     }
                 };
-                // Parse remaining args: directory and CLI flags (--xxx)
-                let mut cwd = String::new();
+                // Parse remaining args: flags (--xxx) and directory (last non-flag arg)
                 let mut extra_args: Vec<&str> = Vec::new();
+                let mut cwd = String::new();
                 for part in &parts[2..] {
                     if part.starts_with("--") {
                         extra_args.push(part);
-                    } else if cwd.is_empty() {
+                    } else {
+                        // Last non-flag arg is the directory
                         cwd = expand_path(part);
                     }
                 }
