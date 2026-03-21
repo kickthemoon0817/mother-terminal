@@ -60,6 +60,14 @@ impl App {
 
         // Main loop
         loop {
+            // Clear stale Ctrl+C hint after timeout
+            if let Some(t) = self.last_ctrl_c {
+                if t.elapsed() > Duration::from_millis(500) {
+                    self.last_ctrl_c = None;
+                    self.message.clear();
+                }
+            }
+
             // Poll PTY output from all panes
             for pane in &mut self.panes {
                 pane.poll_output();
