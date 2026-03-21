@@ -735,7 +735,7 @@ impl App {
         );
 
         let block = Block::default()
-            .borders(Borders::ALL)
+            .borders(Borders::TOP)
             .border_style(Style::default().fg(border_color))
             .title(Span::styled(
                 format!("{status_indicator} {title}"),
@@ -1054,7 +1054,17 @@ impl App {
                 }
             }
             KeyCode::Down => {
-                if self.history_cursor < self.command_history.len() {
+                // If input is empty and bottom layout, open session picker
+                if self.command_input.is_empty()
+                    && self.panel_position == PanelPosition::Bottom
+                    && !self.panes.is_empty()
+                {
+                    self.picker_cursor = self.focused;
+                    self.show_session_picker = true;
+                    self.mode = Mode::Normal;
+                    self.tab_matches.clear();
+                } else if self.history_cursor < self.command_history.len() {
+                    // Otherwise cycle command history
                     self.history_cursor += 1;
                     if self.history_cursor < self.command_history.len() {
                         self.command_input = self.command_history[self.history_cursor].clone();
@@ -1066,16 +1076,6 @@ impl App {
             }
             KeyCode::Tab => {
                 self.apply_tab_completion();
-            }
-            KeyCode::Down => {
-                // Down arrow opens session picker (bottom layout)
-                if self.panel_position == PanelPosition::Bottom && !self.panes.is_empty() {
-                    self.picker_cursor = self.focused;
-                    self.show_session_picker = true;
-                    self.mode = Mode::Normal;
-                    self.command_input.clear();
-                    self.tab_matches.clear();
-                }
             }
             KeyCode::Left => {
                 // Left arrow enters sidebar navigation (left layout only)
