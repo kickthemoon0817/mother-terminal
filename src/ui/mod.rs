@@ -52,7 +52,6 @@ pub struct App {
     message: String,
     should_quit: bool,
     last_ctrl_c: Option<Instant>,
-    scroll_offset: u16,
     terminal_size: (u16, u16),
     sidebar_width: u16,
     sidebar_dragging: bool,
@@ -73,7 +72,6 @@ impl App {
             message: String::new(),
             should_quit: false,
             last_ctrl_c: None,
-            scroll_offset: 0,
             terminal_size: (80, 24),
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
             sidebar_dragging: false,
@@ -241,9 +239,10 @@ impl App {
 
         // Scroll mode indicator
         if matches!(self.mode, Mode::Scroll) {
+            let offset = self.panes.get(self.focused).map(|p| p.scroll_offset).unwrap_or(0);
             spans.push(Span::raw("  │  "));
             spans.push(Span::styled(
-                format!("SCROLL ↑{}", self.scroll_offset),
+                format!("SCROLL ↑{offset}"),
                 Style::default()
                     .fg(Color::Black)
                     .bg(Color::Yellow)
@@ -462,10 +461,36 @@ impl App {
         let screen = pane.screen();
         let (screen_rows, screen_cols) = screen.size();
 
-        // Render screen content (visible screen only — scrollback TBD)
-        for row in 0..inner.height.min(screen_rows) {
-            for col in 0..inner.width.min(screen_cols) {
-                if let Some(cell) = screen.cell(row, col) {
+        // In scroll mode, replay raw history into a tall virtual terminal
+        let scroll_parser;
+        let render_screen = if matches!(self.mode, Mode::Scroll) && is_focused && pane.scroll_offset > 0 {
+            scroll_parser = pane.scrollback_screen(screen_rows, screen_cols);
+            if let Some(ref sp) = scroll_parser {
+                sp.screen()
+            } else {
+                screen
+            }
+        } else {
+            screen
+        };
+
+        // Determine which rows to render when scrolling
+        let (render_rows, render_cols) = render_screen.size();
+        let start_row = if matches!(self.mode, Mode::Scroll) && is_focused && pane.scroll_offset > 0 {
+            let total = render_rows;
+            let visible = inner.height.min(total);
+            total.saturating_sub(visible).saturating_sub(pane.scroll_offset as u16)
+        } else {
+            0
+        };
+
+        for display_row in 0..inner.height.min(render_rows) {
+            let src_row = start_row + display_row;
+            if src_row >= render_rows {
+                break;
+            }
+            for col in 0..inner.width.min(render_cols) {
+                if let Some(cell) = render_screen.cell(src_row, col) {
                     let ch = cell.contents();
                     let fg = convert_vt100_color(cell.fgcolor());
                     let bg = convert_vt100_color(cell.bgcolor());
@@ -492,7 +517,7 @@ impl App {
                     }
 
                     let buf = frame.buffer_mut();
-                    if let Some(buf_cell) = buf.cell_mut((inner.x + col, inner.y + row)) {
+                    if let Some(buf_cell) = buf.cell_mut((inner.x + col, inner.y + display_row)) {
                         buf_cell.set_symbol(&ch);
                         buf_cell.set_style(style);
                     }
@@ -631,8 +656,10 @@ impl App {
             // Ctrl-S enters scroll mode
             (KeyModifiers::CONTROL, KeyCode::Char('s')) => {
                 self.mode = Mode::Scroll;
-                self.scroll_offset = 0;
-                self.message = "scroll mode".to_string();
+                if let Some(pane) = self.panes.get_mut(self.focused) {
+                    pane.scroll_offset = 0;
+                }
+                self.message = "scroll mode — ↑↓ scroll, Esc exit".to_string();
             }
             // Ctrl-N / Ctrl-P: switch panes
             (KeyModifiers::CONTROL, KeyCode::Char('n')) => {
@@ -720,25 +747,48 @@ impl App {
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => {
                 self.mode = Mode::Normal;
-                self.scroll_offset = 0;
+                if let Some(pane) = self.panes.get_mut(self.focused) {
+                    pane.scroll_offset = 0;
+                }
                 self.message.clear();
             }
             KeyCode::Up | KeyCode::Char('k') => {
-                self.scroll_offset = self.scroll_offset.saturating_add(1);
+                if let Some(pane) = self.panes.get_mut(self.focused) {
+                    pane.scroll_offset = pane.scroll_offset.saturating_add(3);
+                }
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                self.scroll_offset = self.scroll_offset.saturating_sub(1);
+                if let Some(pane) = self.panes.get_mut(self.focused) {
+                    if pane.scroll_offset <= 3 {
+                        pane.scroll_offset = 0;
+                        self.mode = Mode::Normal;
+                        self.message.clear();
+                    } else {
+                        pane.scroll_offset = pane.scroll_offset.saturating_sub(3);
+                    }
+                }
             }
             KeyCode::PageUp => {
-                self.scroll_offset = self.scroll_offset.saturating_add(20);
+                if let Some(pane) = self.panes.get_mut(self.focused) {
+                    pane.scroll_offset = pane.scroll_offset.saturating_add(20);
+                }
             }
             KeyCode::PageDown => {
-                self.scroll_offset = self.scroll_offset.saturating_sub(20);
+                if let Some(pane) = self.panes.get_mut(self.focused) {
+                    if pane.scroll_offset <= 20 {
+                        pane.scroll_offset = 0;
+                        self.mode = Mode::Normal;
+                        self.message.clear();
+                    } else {
+                        pane.scroll_offset = pane.scroll_offset.saturating_sub(20);
+                    }
+                }
             }
-            // Any other key exits scroll mode
             _ => {
                 self.mode = Mode::Normal;
-                self.scroll_offset = 0;
+                if let Some(pane) = self.panes.get_mut(self.focused) {
+                    pane.scroll_offset = 0;
+                }
                 self.message.clear();
             }
         }
@@ -793,20 +843,22 @@ impl App {
                 self.sidebar_dragging = false;
             }
             MouseEventKind::ScrollUp => {
-                // Forward as SGR mouse scroll to focused pane
+                // Enter scroll mode and scroll up
+                if matches!(self.mode, Mode::Normal) {
+                    self.mode = Mode::Scroll;
+                }
                 if let Some(pane) = self.panes.get_mut(self.focused) {
-                    let col = mouse.column.saturating_sub(self.sidebar_width + 1) + 1;
-                    let row = mouse.row.saturating_sub(1) + 1;
-                    let seq = format!("\x1b[<64;{col};{row}M");
-                    let _ = pane.send_keys(seq.as_bytes());
+                    pane.scroll_offset = pane.scroll_offset.saturating_add(3);
                 }
             }
             MouseEventKind::ScrollDown => {
                 if let Some(pane) = self.panes.get_mut(self.focused) {
-                    let col = mouse.column.saturating_sub(self.sidebar_width + 1) + 1;
-                    let row = mouse.row.saturating_sub(1) + 1;
-                    let seq = format!("\x1b[<65;{col};{row}M");
-                    let _ = pane.send_keys(seq.as_bytes());
+                    if pane.scroll_offset <= 3 {
+                        pane.scroll_offset = 0;
+                        self.mode = Mode::Normal;
+                    } else {
+                        pane.scroll_offset = pane.scroll_offset.saturating_sub(3);
+                    }
                 }
             }
             _ => {}
@@ -961,7 +1013,9 @@ impl App {
 
             "scroll" => {
                 self.mode = Mode::Scroll;
-                self.scroll_offset = 0;
+                if let Some(pane) = self.panes.get_mut(self.focused) {
+                    pane.scroll_offset = 0;
+                }
             }
 
             "quit" | "q" => {

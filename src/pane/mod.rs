@@ -49,9 +49,11 @@ pub struct Pane {
     pub cwd: String,
     pub status: Status,
     pub started: Instant,
+    pub scroll_offset: usize,
 
     writer: Box<dyn Write + Send>,
     buffer: Arc<Mutex<Vec<u8>>>,
+    raw_history: Arc<Mutex<Vec<u8>>>,
     parser: vt100::Parser,
     master: Box<dyn MasterPty + Send>,
     child: Box<dyn portable_pty::Child + Send>,
@@ -77,19 +79,29 @@ impl Pane {
         let mut reader = pair.master.try_clone_reader()?;
         let writer = pair.master.take_writer()?;
 
-        // Shared buffer for async PTY output
+        // Shared buffers for async PTY output
         let buffer: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::with_capacity(8192)));
+        let raw_history: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::with_capacity(65536)));
         let buf_clone = Arc::clone(&buffer);
+        let hist_clone = Arc::clone(&raw_history);
 
         // Background thread reads PTY output continuously
         std::thread::spawn(move || {
             let mut tmp = [0u8; 4096];
             loop {
                 match reader.read(&mut tmp) {
-                    Ok(0) => break, // EOF
+                    Ok(0) => break,
                     Ok(n) => {
                         if let Ok(mut buf) = buf_clone.lock() {
                             buf.extend_from_slice(&tmp[..n]);
+                        }
+                        if let Ok(mut hist) = hist_clone.lock() {
+                            hist.extend_from_slice(&tmp[..n]);
+                            // Cap at 1MB to prevent unbounded growth
+                            if hist.len() > 1_048_576 {
+                                let drain = hist.len() - 524_288;
+                                hist.drain(..drain);
+                            }
                         }
                     }
                     Err(_) => break,
@@ -103,8 +115,10 @@ impl Pane {
             cwd: cwd.to_string(),
             status: Status::Active,
             started: Instant::now(),
+            scroll_offset: 0,
             writer,
             buffer,
+            raw_history,
             parser: vt100::Parser::new(rows, cols, 1000),
             master: pair.master,
             child,
@@ -176,6 +190,20 @@ impl Pane {
                 false
             }
         }
+    }
+
+    /// Get a scrollback screen by replaying raw history into a tall virtual terminal.
+    /// Returns (parser, total_rows) where you can access cells from the parser's screen.
+    pub fn scrollback_screen(&self, visible_rows: u16, cols: u16) -> Option<vt100::Parser> {
+        let hist = self.raw_history.lock().ok()?;
+        if hist.is_empty() {
+            return None;
+        }
+        // Create a tall parser to hold all output
+        let tall_rows = visible_rows.saturating_mul(10).max(500);
+        let mut tall_parser = vt100::Parser::new(tall_rows, cols, 0);
+        tall_parser.process(&hist);
+        Some(tall_parser)
     }
 
     /// Kill the child process and reap it to prevent zombies.
