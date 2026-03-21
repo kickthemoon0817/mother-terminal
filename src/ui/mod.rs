@@ -477,9 +477,14 @@ impl App {
         // Determine which rows to render when scrolling
         let (render_rows, render_cols) = render_screen.size();
         let start_row = if matches!(self.mode, Mode::Scroll) && is_focused && pane.scroll_offset > 0 {
-            let total = render_rows;
-            let visible = inner.height.min(total);
-            total.saturating_sub(visible).saturating_sub(pane.scroll_offset as u16)
+            // Find the cursor row (last content row) in the tall screen
+            let (cursor_row, _) = render_screen.cursor_position();
+            let visible = inner.height.min(render_rows);
+            // Base = cursor at bottom of view, scroll_offset moves up
+            cursor_row
+                .saturating_sub(visible)
+                .saturating_add(1)
+                .saturating_sub(pane.scroll_offset as u16)
         } else {
             0
         };
