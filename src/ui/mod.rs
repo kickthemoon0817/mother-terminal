@@ -162,10 +162,13 @@ impl App {
             .constraints([
                 Constraint::Length(1), // status bar
                 Constraint::Min(1),   // main area
+                Constraint::Length(1), // usage limits bar
             ])
             .split(size);
 
         self.draw_status_bar(frame, outer[0]);
+
+        self.draw_usage_bar(frame, outer[2]);
 
         if self.panes.is_empty() {
             let msg = Paragraph::new("  No sessions. Type :spawn claude <dir> to start.")
@@ -297,7 +300,7 @@ impl App {
             spans.push(Span::raw("  │  "));
             spans.push(Span::styled(
                 &self.message,
-                Style::default().fg(Color::Cyan),
+                Style::default().fg(Color::Rgb(120, 80, 170)),
             ));
         }
 
@@ -460,6 +463,70 @@ impl App {
             let row = Rect { x: inner.x, y: row_y, width: inner.width, height: 1 };
             frame.render_widget(Paragraph::new(line), row);
         }
+    }
+
+    fn draw_usage_bar(&self, frame: &mut Frame, area: Rect) {
+        let sep = Span::styled(" │ ", Style::default().fg(Color::Rgb(40, 40, 40)));
+
+        let mut spans: Vec<Span> = vec![Span::raw(" ")];
+
+        for (cli, name, limit_h) in [
+            (CLIType::Claude, "claude", 5u32),
+            (CLIType::Codex, "codex", 5u32),
+            (CLIType::Gemini, "gemini", 4u32),
+        ] {
+            let count = self.panes.iter().filter(|p| p.cli == cli).count();
+            // Simple usage estimate based on session age
+            let total_mins: u64 = self.panes
+                .iter()
+                .filter(|p| p.cli == cli && p.status == Status::Active)
+                .map(|p| p.started.elapsed().as_secs() / 60)
+                .sum();
+            let limit_mins = limit_h as u64 * 60;
+            let remaining_mins = limit_mins.saturating_sub(total_mins);
+            let pct = if limit_mins > 0 {
+                ((limit_mins - remaining_mins) * 100 / limit_mins) as u32
+            } else {
+                0
+            };
+            let rem_h = remaining_mins / 60;
+            let rem_m = remaining_mins % 60;
+
+            spans.push(Span::styled(
+                format!("●"),
+                Style::default().fg(cli_color(cli)),
+            ));
+            spans.push(Span::styled(
+                format!("{name} {limit_h}h:{pct}%({rem_h}h{rem_m:02}m)"),
+                Style::default().fg(Color::DarkGray),
+            ));
+            if count > 0 {
+                spans.push(Span::styled(
+                    format!(" [{count}]"),
+                    Style::default().fg(Color::Gray),
+                ));
+            }
+            spans.push(sep.clone());
+        }
+
+        // Session count
+        let total = self.panes.len();
+        spans.push(Span::styled(
+            format!("sessions:{total}"),
+            Style::default().fg(Color::DarkGray),
+        ));
+
+        if !self.panes.is_empty() {
+            spans.push(Span::raw("  "));
+            spans.push(Span::styled(
+                "Ctrl-J picker",
+                Style::default().fg(Color::Rgb(50, 50, 50)),
+            ));
+        }
+
+        let bar = Paragraph::new(Line::from(spans))
+            .style(Style::default().bg(Color::Rgb(18, 18, 18)));
+        frame.render_widget(bar, area);
     }
 
     fn draw_session_tab_bar(&self, frame: &mut Frame, area: Rect) {
@@ -639,7 +706,7 @@ impl App {
 
         let block = Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Cyan))
+            .border_style(Style::default().fg(Color::Rgb(120, 80, 170)))
             .style(Style::default().bg(Color::Rgb(20, 20, 20)));
 
         let para = Paragraph::new(lines).block(block);
@@ -777,7 +844,7 @@ impl App {
             Span::styled(
                 " ❯ ",
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(Color::Rgb(120, 80, 170))
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw(&self.command_input),
@@ -794,7 +861,7 @@ impl App {
             }
         }
 
-        spans.push(Span::styled("█", Style::default().fg(Color::Cyan)));
+        spans.push(Span::styled("█", Style::default().fg(Color::Rgb(120, 80, 170))));
 
         let block = Block::default()
             .borders(Borders::TOP | Borders::BOTTOM)
