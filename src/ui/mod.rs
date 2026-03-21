@@ -967,13 +967,7 @@ impl App {
                     self.last_ctrl_c = Some(Instant::now());
                 }
             }
-            // Down arrow opens session picker (bottom layout only)
-            (KeyModifiers::CONTROL, KeyCode::Char('j')) => {
-                if !self.panes.is_empty() {
-                    self.picker_cursor = self.focused;
-                    self.show_session_picker = true;
-                }
-            }
+            // Ctrl-J removed — session picker only available from command mode
             // : enters mtt command mode (/ passes through to the pane for AI CLI slash commands)
             (_, KeyCode::Char(':')) => {
                 self.mode = Mode::Command;
@@ -1061,6 +1055,15 @@ impl App {
             }
             KeyCode::Tab => {
                 self.apply_tab_completion();
+            }
+            KeyCode::F(2) => {
+                // F2 opens session picker from command mode
+                if !self.panes.is_empty() {
+                    self.picker_cursor = self.focused;
+                    self.show_session_picker = true;
+                    self.mode = Mode::Normal;
+                    self.command_input.clear();
+                }
             }
             KeyCode::Char(c) => {
                 self.command_input.push(c);
@@ -1361,6 +1364,15 @@ impl App {
 
             "quit" | "q" => {
                 self.should_quit = true;
+            }
+
+            "sessions" | "ss" => {
+                if !self.panes.is_empty() {
+                    self.picker_cursor = self.focused;
+                    self.show_session_picker = true;
+                } else {
+                    self.message = "no sessions".to_string();
+                }
             }
 
             "layout" | "l" => {
