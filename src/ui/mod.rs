@@ -461,12 +461,13 @@ impl App {
             for col in 0..inner.width.min(screen_cols) {
                 if let Some(cell) = screen.cell(row, col) {
                     let ch = cell.contents();
-                    if ch.is_empty() {
-                        continue;
-                    }
-
                     let fg = convert_vt100_color(cell.fgcolor());
                     let bg = convert_vt100_color(cell.bgcolor());
+
+                    // Skip truly empty cells (no content AND no background)
+                    if ch.is_empty() && bg == Color::Reset {
+                        continue;
+                    }
                     let mut style = Style::default();
                     if fg != Color::Reset {
                         style = style.fg(fg);
