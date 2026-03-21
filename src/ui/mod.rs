@@ -26,7 +26,7 @@ const BOTTOM_PANEL_HEIGHT: u16 = 5;
 
 /// Known commands for tab autocomplete.
 const COMMANDS: &[&str] = &[
-    "spawn", "kill", "broadcast", "quit", "help", "history", "scroll",
+    "spawn", "kill", "broadcast", "quit", "help", "history", "scroll", "layout",
 ];
 
 /// Known CLI names for tab autocomplete.
@@ -37,6 +37,13 @@ enum Mode {
     Normal,   // pane focused, keys go to AI CLI
     Command,  // typing a command in the command bar
     Scroll,   // scrolling through pane scrollback
+}
+
+/// Session panel position.
+#[derive(Clone, Copy, PartialEq)]
+enum PanelPosition {
+    Left,
+    Bottom,
 }
 
 /// The main application state.
@@ -56,6 +63,8 @@ pub struct App {
     sidebar_width: u16,
     sidebar_dragging: bool,
     show_bottom_panel: bool,
+    panel_position: PanelPosition,
+    show_help: bool,
 }
 
 impl App {
@@ -76,6 +85,8 @@ impl App {
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
             sidebar_dragging: false,
             show_bottom_panel: false,
+            panel_position: PanelPosition::Left,
+            show_help: false,
         }
     }
 
@@ -158,7 +169,7 @@ impl App {
                 .style(Style::default().fg(Color::DarkGray));
             frame.render_widget(msg, outer[1]);
         } else {
-            // Split main area: optional bottom panel
+            // Optional extra bottom panel (usage/limits)
             let main_area = if self.show_bottom_panel {
                 let vsplit = Layout::default()
                     .direction(Direction::Vertical)
@@ -173,19 +184,41 @@ impl App {
                 outer[1]
             };
 
-            let main = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([
-                    Constraint::Length(self.sidebar_width),
-                    Constraint::Min(1),
-                ])
-                .split(main_area);
+            match self.panel_position {
+                PanelPosition::Left => {
+                    let main = Layout::default()
+                        .direction(Direction::Horizontal)
+                        .constraints([
+                            Constraint::Length(self.sidebar_width),
+                            Constraint::Min(1),
+                        ])
+                        .split(main_area);
 
-            self.draw_sidebar(frame, main[0]);
-            self.draw_pane_content(frame, main[1], self.focused);
+                    self.draw_sidebar(frame, main[0]);
+                    self.draw_pane_content(frame, main[1], self.focused);
+                }
+                PanelPosition::Bottom => {
+                    let session_bar_height = (self.panes.len() as u16 + 2).min(6);
+                    let main = Layout::default()
+                        .direction(Direction::Vertical)
+                        .constraints([
+                            Constraint::Min(1),
+                            Constraint::Length(session_bar_height),
+                        ])
+                        .split(main_area);
+
+                    self.draw_pane_content(frame, main[0], self.focused);
+                    self.draw_sidebar(frame, main[1]);
+                }
+            }
         }
 
         self.draw_command_bar(frame, outer[2]);
+
+        // Help overlay (drawn last, on top of everything)
+        if self.show_help {
+            self.draw_help_overlay(frame, size);
+        }
     }
 
     fn draw_status_bar(&self, frame: &mut Frame, area: Rect) {
@@ -419,6 +452,53 @@ impl App {
         }
     }
 
+    fn draw_help_overlay(&self, frame: &mut Frame, area: Rect) {
+        let help_text = vec![
+            "",
+            "  mtt — AI-Native Terminal Multiplexer",
+            "",
+            "  Commands (press : to enter)",
+            "  ─────────────────────────────────────",
+            "  :spawn <cli> [--flags] [dir]  start session",
+            "  :kill [n]                     kill session",
+            "  :broadcast <msg>              send to all",
+            "  :layout                       toggle side/bottom",
+            "  :scroll                       enter scroll mode",
+            "  :help                         show this help",
+            "  :quit                         exit mtt",
+            "",
+            "  Keys",
+            "  ─────────────────────────────────────",
+            "  Ctrl-N / Ctrl-P               switch pane",
+            "  Alt-1..9                      jump to pane",
+            "  Ctrl-S                        scroll mode",
+            "  Ctrl-C                        interrupt / kill",
+            "  : or /                        command / AI slash",
+            "",
+            "  Press any key to close",
+        ];
+
+        let width = 45u16;
+        let height = help_text.len() as u16 + 2;
+        let x = area.width.saturating_sub(width) / 2;
+        let y = area.height.saturating_sub(height) / 2;
+
+        let help_area = Rect { x, y, width, height };
+
+        let lines: Vec<Line> = help_text
+            .iter()
+            .map(|s| Line::from(Span::styled(*s, Style::default().fg(Color::Gray))))
+            .collect();
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan))
+            .style(Style::default().bg(Color::Rgb(20, 20, 20)));
+
+        let para = Paragraph::new(lines).block(block);
+        frame.render_widget(para, help_area);
+    }
+
     fn draw_pane_content(&self, frame: &mut Frame, area: Rect, pane_idx: usize) {
         if pane_idx >= self.panes.len() {
             return;
@@ -598,6 +678,12 @@ impl App {
     // ── Input handling ───────────────────────────────────────────────────
 
     fn handle_key(&mut self, key: KeyEvent) {
+        // Dismiss help overlay on any key
+        if self.show_help {
+            self.show_help = false;
+            return;
+        }
+
         match &self.mode {
             Mode::Normal => self.handle_normal_key(key),
             Mode::Command => self.handle_command_key(key),
@@ -1041,10 +1127,20 @@ impl App {
                 self.should_quit = true;
             }
 
+            "layout" | "l" => {
+                self.panel_position = match self.panel_position {
+                    PanelPosition::Left => PanelPosition::Bottom,
+                    PanelPosition::Bottom => PanelPosition::Left,
+                };
+                let pos = match self.panel_position {
+                    PanelPosition::Left => "left",
+                    PanelPosition::Bottom => "bottom",
+                };
+                self.message = format!("panel: {pos}");
+            }
+
             "help" | "h" => {
-                self.message =
-                    "spawn kill broadcast scroll quit | Ctrl-N/P switch | Ctrl-S scroll"
-                        .to_string();
+                self.show_help = true;
             }
 
             _ => {
