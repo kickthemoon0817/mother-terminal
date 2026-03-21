@@ -28,6 +28,8 @@ pub struct App {
     pub focused: usize,
     mode: Mode,
     command_input: String,
+    command_history: Vec<String>,
+    history_cursor: usize,
     message: String,
     should_quit: bool,
 }
@@ -39,6 +41,8 @@ impl App {
             focused: 0,
             mode: Mode::Normal,
             command_input: String::new(),
+            command_history: Vec::new(),
+            history_cursor: 0,
             message: String::new(),
             should_quit: false,
         }
@@ -85,19 +89,37 @@ impl App {
     fn draw(&self, frame: &mut Frame) {
         let size = frame.area();
 
-        // Layout: status bar (1) + panes (rest) + command bar (1)
-        let chunks = Layout::default()
+        // Layout: status bar (1) + main area (rest) + command bar (1)
+        let outer = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(1),     // status bar
-                Constraint::Min(1),        // pane area
+                Constraint::Min(1),        // main area
                 Constraint::Length(1),     // command bar
             ])
             .split(size);
 
-        self.draw_status_bar(frame, chunks[0]);
-        self.draw_panes(frame, chunks[1]);
-        self.draw_command_bar(frame, chunks[2]);
+        self.draw_status_bar(frame, outer[0]);
+
+        if self.panes.is_empty() {
+            let msg = Paragraph::new("  No sessions. Type :spawn claude <dir> to start.")
+                .style(Style::default().fg(Color::DarkGray));
+            frame.render_widget(msg, outer[1]);
+        } else {
+            // Sidebar (session list) + focused pane
+            let main = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([
+                    Constraint::Length(22),    // sidebar
+                    Constraint::Min(1),        // focused pane
+                ])
+                .split(outer[1]);
+
+            self.draw_sidebar(frame, main[0]);
+            self.draw_pane_content(frame, main[1], self.focused);
+        }
+
+        self.draw_command_bar(frame, outer[2]);
     }
 
     fn draw_status_bar(&self, frame: &mut Frame, area: Rect) {
@@ -140,44 +162,83 @@ impl App {
         frame.render_widget(bar, area);
     }
 
-    fn draw_panes(&self, frame: &mut Frame, area: Rect) {
-        if self.panes.is_empty() {
-            let msg = Paragraph::new("  No sessions. Type :spawn claude <dir> to start.")
-                .style(Style::default().fg(Color::DarkGray));
-            frame.render_widget(msg, area);
-            return;
-        }
+    fn draw_sidebar(&self, frame: &mut Frame, area: Rect) {
+        let block = Block::default()
+            .borders(Borders::RIGHT)
+            .border_style(Style::default().fg(Color::DarkGray))
+            .title(Span::styled(
+                " sessions ",
+                Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD),
+            ));
 
-        // Single pane — full area
-        if self.panes.len() == 1 {
-            self.draw_pane_content(frame, area, 0);
-            return;
-        }
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
 
-        // Multiple panes — split horizontally (2 columns)
-        let pane_count = self.panes.len();
-        let cols = if pane_count <= 2 { pane_count } else { 2 };
-        let rows = pane_count.div_ceil(cols);
-
-        let row_chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints(vec![Constraint::Ratio(1, rows as u32); rows])
-            .split(area);
-
-        let mut pane_idx = 0;
-        for (row_i, row_area) in row_chunks.iter().enumerate() {
-            let panes_in_row = if row_i == rows - 1 { pane_count - pane_idx } else { cols };
-            let col_chunks = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints(vec![Constraint::Ratio(1, panes_in_row as u32); panes_in_row])
-                .split(*row_area);
-
-            for col_area in col_chunks.iter() {
-                if pane_idx < pane_count {
-                    self.draw_pane_content(frame, *col_area, pane_idx);
-                    pane_idx += 1;
-                }
+        for (i, pane) in self.panes.iter().enumerate() {
+            if i as u16 >= inner.height {
+                break;
             }
+
+            let is_focused = i == self.focused;
+
+            let status_icon = match pane.status {
+                Status::Active => "●",
+                Status::Stalled => "◐",
+                Status::Dead => "✕",
+            };
+
+            let status_color = match pane.status {
+                Status::Active => Color::Green,
+                Status::Stalled => Color::Yellow,
+                Status::Dead => Color::Red,
+            };
+
+            // Short project name from CWD
+            let project = std::path::Path::new(&pane.cwd)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| pane.cwd.clone());
+
+            let label = format!(
+                " {} {} {}",
+                status_icon,
+                pane.cli.name(),
+                truncate_str(&project, 12)
+            );
+
+            let style = if is_focused {
+                Style::default()
+                    .fg(cli_color(pane.cli))
+                    .bg(Color::Rgb(40, 40, 40))
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Gray)
+            };
+
+            let idx_label = format!("{}", i + 1);
+            let line = Line::from(vec![
+                Span::styled(
+                    format!(" {idx_label}"),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::styled(label, style),
+            ]);
+
+            let row_area = Rect {
+                x: inner.x,
+                y: inner.y + i as u16,
+                width: inner.width,
+                height: 1,
+            };
+
+            let bg = if is_focused {
+                Style::default().bg(Color::Rgb(40, 40, 40))
+            } else {
+                Style::default()
+            };
+
+            let p = Paragraph::new(line).style(bg);
+            frame.render_widget(p, row_area);
         }
     }
 
@@ -238,6 +299,23 @@ impl App {
                 if let Some(buf_cell) = buf.cell_mut((inner.x + col, inner.y + row)) {
                     buf_cell.set_symbol(&ch);
                     buf_cell.set_style(style);
+                }
+            }
+        }
+
+        // Render cursor
+        if is_focused && !screen.hide_cursor() {
+            let (cursor_row, cursor_col) = screen.cursor_position();
+            if cursor_row < inner.height && cursor_col < inner.width {
+                let buf = frame.buffer_mut();
+                if let Some(buf_cell) =
+                    buf.cell_mut((inner.x + cursor_col, inner.y + cursor_row))
+                {
+                    buf_cell.set_style(
+                        Style::default()
+                            .bg(Color::White)
+                            .fg(Color::Black),
+                    );
                 }
             }
         }
@@ -317,15 +395,36 @@ impl App {
             KeyCode::Esc => {
                 self.mode = Mode::Normal;
                 self.command_input.clear();
+                self.history_cursor = self.command_history.len();
             }
             KeyCode::Enter => {
                 let cmd = self.command_input.clone();
                 self.command_input.clear();
                 self.mode = Mode::Normal;
+                if !cmd.is_empty() {
+                    self.command_history.push(cmd.clone());
+                }
+                self.history_cursor = self.command_history.len();
                 self.execute_command(&cmd);
             }
             KeyCode::Backspace => {
                 self.command_input.pop();
+            }
+            KeyCode::Up => {
+                if !self.command_history.is_empty() && self.history_cursor > 0 {
+                    self.history_cursor -= 1;
+                    self.command_input = self.command_history[self.history_cursor].clone();
+                }
+            }
+            KeyCode::Down => {
+                if self.history_cursor < self.command_history.len() {
+                    self.history_cursor += 1;
+                    if self.history_cursor < self.command_history.len() {
+                        self.command_input = self.command_history[self.history_cursor].clone();
+                    } else {
+                        self.command_input.clear();
+                    }
+                }
             }
             KeyCode::Char(c) => {
                 self.command_input.push(c);
@@ -481,6 +580,14 @@ fn key_to_bytes(key: KeyEvent) -> Vec<u8> {
 }
 
 /// Shorten a path for display.
+fn truncate_str(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        s.to_string()
+    } else {
+        format!("{}…", &s[..max.saturating_sub(1)])
+    }
+}
+
 fn short_path(path: &str) -> String {
     if let Some(home) = dirs::home_dir() {
         let home_str = home.to_string_lossy();
