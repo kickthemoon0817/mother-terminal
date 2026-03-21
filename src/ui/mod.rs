@@ -499,7 +499,7 @@ impl App {
             let rem_m = remaining_mins % 60;
 
             spans.push(Span::styled(
-                format!("●"),
+                "●".to_string(),
                 Style::default().fg(cli_color(cli)),
             ));
             spans.push(Span::styled(
@@ -829,7 +829,7 @@ impl App {
                     }
 
                     // Wide characters (Korean/CJK) take 2 columns
-                    let w = if ch.chars().any(|c| is_wide_char(c)) { 2 } else { 1 };
+                    let w = if ch.chars().any(is_wide_char) { 2 } else { 1 };
                     col += w;
                 } else {
                     col += 1;
@@ -1497,8 +1497,29 @@ fn convert_vt100_color(color: vt100::Color) -> Color {
 
 fn key_to_bytes(key: KeyEvent) -> Vec<u8> {
     match (key.modifiers, key.code) {
+        // Ctrl+Backspace: delete word backward (send ESC + DEL or Ctrl+W)
+        (KeyModifiers::CONTROL, KeyCode::Backspace) => vec![0x17], // Ctrl+W
+        // Alt/Option+Backspace: delete word backward
+        (KeyModifiers::ALT, KeyCode::Backspace) => b"\x1b\x7f".to_vec(), // ESC + DEL
+        // Ctrl+Delete: delete word forward
+        (KeyModifiers::CONTROL, KeyCode::Delete) => b"\x1b[3;5~".to_vec(),
+        // Alt+Left/Right: word jump
+        (KeyModifiers::ALT, KeyCode::Left) => b"\x1bb".to_vec(),  // ESC + b
+        (KeyModifiers::ALT, KeyCode::Right) => b"\x1bf".to_vec(), // ESC + f
+        // Ctrl+Left/Right: word jump (alternative)
+        (KeyModifiers::CONTROL, KeyCode::Left) => b"\x1b[1;5D".to_vec(),
+        (KeyModifiers::CONTROL, KeyCode::Right) => b"\x1b[1;5C".to_vec(),
+        // Ctrl+char
         (KeyModifiers::CONTROL, KeyCode::Char(c)) => {
             vec![(c as u8) & 0x1f]
+        }
+        // Alt+char
+        (KeyModifiers::ALT, KeyCode::Char(c)) => {
+            let mut bytes = vec![b'\x1b'];
+            let mut buf = [0u8; 4];
+            let s = c.encode_utf8(&mut buf);
+            bytes.extend_from_slice(s.as_bytes());
+            bytes
         }
         (_, KeyCode::Char(c)) => {
             let mut buf = [0u8; 4];
