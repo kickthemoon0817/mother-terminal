@@ -792,33 +792,10 @@ impl App {
             MouseEventKind::Up(MouseButton::Left) => {
                 self.sidebar_dragging = false;
             }
-            MouseEventKind::ScrollUp => {
-                // Forward scroll to the focused pane (send arrow up x3)
-                if matches!(self.mode, Mode::Normal) {
-                    if let Some(pane) = self.panes.get_mut(self.focused) {
-                        for _ in 0..3 {
-                            let _ = pane.send_keys(b"\x1b[A");
-                        }
-                    }
-                } else if matches!(self.mode, Mode::Scroll) {
-                    self.scroll_offset = self.scroll_offset.saturating_add(3);
-                }
-            }
-            MouseEventKind::ScrollDown => {
-                if matches!(self.mode, Mode::Normal) {
-                    if let Some(pane) = self.panes.get_mut(self.focused) {
-                        for _ in 0..3 {
-                            let _ = pane.send_keys(b"\x1b[B");
-                        }
-                    }
-                } else if matches!(self.mode, Mode::Scroll) {
-                    if self.scroll_offset <= 3 {
-                        self.scroll_offset = 0;
-                        self.mode = Mode::Normal;
-                    } else {
-                        self.scroll_offset = self.scroll_offset.saturating_sub(3);
-                    }
-                }
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                // Don't forward scroll to pane (arrow keys cycle input history).
+                // Scroll events are ignored in Normal mode — AI CLIs handle
+                // their own output scrolling internally.
             }
             _ => {}
         }
