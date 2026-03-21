@@ -158,7 +158,7 @@ impl App {
         // Multiple panes — split horizontally (2 columns)
         let pane_count = self.panes.len();
         let cols = if pane_count <= 2 { pane_count } else { 2 };
-        let rows = (pane_count + cols - 1) / cols;
+        let rows = pane_count.div_ceil(cols);
 
         let row_chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -403,10 +403,10 @@ impl App {
                 }
                 let mut sent = 0;
                 for pane in &mut self.panes {
-                    if pane.status == Status::Active {
-                        if pane.send_text(&text).is_ok() {
-                            sent += 1;
-                        }
+                    if pane.status == Status::Active
+                        && pane.send_text(&text).is_ok()
+                    {
+                        sent += 1;
                     }
                 }
                 self.message = format!("broadcast to {sent} sessions");
