@@ -1,5 +1,5 @@
 use anyhow::Result;
-use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
+use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -51,7 +51,7 @@ pub struct Pane {
     pub started: Instant,
 
     writer: Box<dyn Write + Send>,
-    reader: Arc<Mutex<Box<dyn Read + Send>>>,
+    buffer: Arc<Mutex<Vec<u8>>>,
     parser: vt100::Parser,
     master: Box<dyn MasterPty + Send>,
     child: Box<dyn portable_pty::Child + Send>,
@@ -72,11 +72,30 @@ impl Pane {
         cmd.cwd(cwd);
 
         let child = pair.slave.spawn_command(cmd)?;
-        // Drop slave — the child process holds the only reference
         drop(pair.slave);
 
-        let reader = pair.master.try_clone_reader()?;
+        let mut reader = pair.master.try_clone_reader()?;
         let writer = pair.master.take_writer()?;
+
+        // Shared buffer for async PTY output
+        let buffer: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::with_capacity(8192)));
+        let buf_clone = Arc::clone(&buffer);
+
+        // Background thread reads PTY output continuously
+        std::thread::spawn(move || {
+            let mut tmp = [0u8; 4096];
+            loop {
+                match reader.read(&mut tmp) {
+                    Ok(0) => break, // EOF
+                    Ok(n) => {
+                        if let Ok(mut buf) = buf_clone.lock() {
+                            buf.extend_from_slice(&tmp[..n]);
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
 
         Ok(Self {
             id,
@@ -85,46 +104,37 @@ impl Pane {
             status: Status::Active,
             started: Instant::now(),
             writer,
-            reader: Arc::new(Mutex::new(reader)),
+            buffer,
+            parser: vt100::Parser::new(rows, cols, 1000),
             master: pair.master,
-            parser: vt100::Parser::new(rows, cols, 1000), // 1000 lines scrollback
             child,
         })
     }
 
-    /// Read new output from the PTY and update the virtual screen.
-    /// Returns true if there was new data.
+    /// Drain buffered PTY output and update the virtual screen.
+    /// Non-blocking — returns true if there was new data.
     pub fn poll_output(&mut self) -> bool {
-        let mut buf = [0u8; 4096];
-        let reader = self.reader.clone();
-        let mut reader = match reader.try_lock() {
-            Ok(r) => r,
-            Err(_) => return false,
+        let data = {
+            let mut buf = match self.buffer.lock() {
+                Ok(b) => b,
+                Err(_) => return false,
+            };
+            if buf.is_empty() {
+                return false;
+            }
+            let data = buf.clone();
+            buf.clear();
+            data
         };
 
-        // Non-blocking read — set_non_blocking isn't available on all platforms,
-        // so we rely on the caller to poll at intervals
-        match reader.read(&mut buf) {
-            Ok(0) => {
-                // EOF — process exited
-                self.status = Status::Dead;
-                false
-            }
-            Ok(n) => {
-                self.parser.process(&buf[..n]);
-                true
-            }
-            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => false,
-            Err(_) => {
-                self.status = Status::Dead;
-                false
-            }
-        }
+        self.parser.process(&data);
+        true
     }
 
     /// Send keystrokes to the PTY.
     pub fn send_keys(&mut self, data: &[u8]) -> Result<()> {
         self.writer.write_all(data)?;
+        self.writer.flush()?;
         Ok(())
     }
 
@@ -132,6 +142,7 @@ impl Pane {
     pub fn send_text(&mut self, text: &str) -> Result<()> {
         self.writer.write_all(text.as_bytes())?;
         self.writer.write_all(b"\r")?;
+        self.writer.flush()?;
         Ok(())
     }
 
@@ -180,8 +191,9 @@ impl Pane {
         for row in 0..screen.size().0 {
             let mut line = String::new();
             for col in 0..screen.size().1 {
-                let cell = screen.cell(row, col).unwrap();
-                line.push(cell.contents().chars().next().unwrap_or(' '));
+                if let Some(cell) = screen.cell(row, col) {
+                    line.push(cell.contents().chars().next().unwrap_or(' '));
+                }
             }
             lines.push(line.trim_end().to_string());
         }

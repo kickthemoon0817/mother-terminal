@@ -62,13 +62,12 @@ impl App {
             // Draw UI
             terminal.draw(|frame| self.draw(frame))?;
 
-            // Handle input (with timeout for PTY polling)
+            // Handle input — read ONE event per poll cycle
             if event::poll(Duration::from_millis(16))? {
-                if let Event::Key(key) = event::read()? {
-                    self.handle_key(key);
-                }
-                if let Event::Resize(cols, rows) = event::read().unwrap_or(Event::FocusLost) {
-                    self.handle_resize(cols, rows);
+                match event::read()? {
+                    Event::Key(key) => self.handle_key(key),
+                    Event::Resize(cols, rows) => self.handle_resize(cols, rows),
+                    _ => {}
                 }
             }
 
