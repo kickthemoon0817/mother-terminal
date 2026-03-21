@@ -759,17 +759,16 @@ impl App {
             }
             KeyCode::Up | KeyCode::Char('k') => {
                 if let Some(pane) = self.panes.get_mut(self.focused) {
-                    pane.scroll_offset = pane.scroll_offset.saturating_add(3);
+                    pane.scroll_offset = pane.scroll_offset.saturating_add(1);
                 }
             }
             KeyCode::Down | KeyCode::Char('j') => {
                 if let Some(pane) = self.panes.get_mut(self.focused) {
-                    if pane.scroll_offset <= 3 {
-                        pane.scroll_offset = 0;
+                    if pane.scroll_offset == 0 {
                         self.mode = Mode::Normal;
                         self.message.clear();
                     } else {
-                        pane.scroll_offset = pane.scroll_offset.saturating_sub(3);
+                        pane.scroll_offset = pane.scroll_offset.saturating_sub(1);
                     }
                 }
             }
