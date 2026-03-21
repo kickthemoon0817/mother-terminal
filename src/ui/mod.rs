@@ -474,20 +474,28 @@ impl App {
                     .map(|t| t.elapsed() < Duration::from_millis(500))
                     .unwrap_or(false);
 
-                if let Some(pane) = self.panes.get_mut(self.focused) {
-                    if pane.status == Status::Active {
+                if !self.panes.is_empty() && self.focused < self.panes.len() {
+                    if self.panes[self.focused].status == Status::Active {
                         if double {
-                            pane.kill();
-                            self.message = format!("killed session {}", self.focused + 1);
+                            self.panes[self.focused].kill();
+                            self.panes.remove(self.focused);
+                            if self.focused >= self.panes.len() && !self.panes.is_empty() {
+                                self.focused = self.panes.len() - 1;
+                            }
+                            self.message = "session killed and removed".to_string();
                             self.last_ctrl_c = None;
                         } else {
-                            let _ = pane.send_keys(&[0x03]);
+                            let _ = self.panes[self.focused].send_keys(&[0x03]);
                             self.message = "interrupt sent (Ctrl+C again to kill)".to_string();
                             self.last_ctrl_c = Some(Instant::now());
                         }
                     } else if double {
-                        pane.kill();
-                        self.message = format!("killed session {}", self.focused + 1);
+                        self.panes[self.focused].kill();
+                        self.panes.remove(self.focused);
+                        if self.focused >= self.panes.len() && !self.panes.is_empty() {
+                            self.focused = self.panes.len() - 1;
+                        }
+                        self.message = "session removed".to_string();
                         self.last_ctrl_c = None;
                     } else {
                         self.message = "Ctrl+C again to kill session".to_string();
@@ -771,14 +779,20 @@ impl App {
             }
 
             "kill" | "k" => {
-                if let Some(idx) = parts.get(1).and_then(|s| s.parse::<usize>().ok()) {
-                    if idx > 0 && idx <= self.panes.len() {
-                        self.panes[idx - 1].kill();
-                        self.message = format!("killed session {idx}");
-                    }
+                let target = if let Some(idx) = parts.get(1).and_then(|s| s.parse::<usize>().ok()) {
+                    if idx > 0 && idx <= self.panes.len() { Some(idx - 1) } else { None }
                 } else if !self.panes.is_empty() {
-                    self.panes[self.focused].kill();
-                    self.message = "killed focused session".to_string();
+                    Some(self.focused)
+                } else {
+                    None
+                };
+                if let Some(idx) = target {
+                    self.panes[idx].kill();
+                    self.panes.remove(idx);
+                    if self.focused >= self.panes.len() && !self.panes.is_empty() {
+                        self.focused = self.panes.len() - 1;
+                    }
+                    self.message = format!("killed session {}", idx + 1);
                 }
             }
 
