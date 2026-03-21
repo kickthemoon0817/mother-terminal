@@ -178,9 +178,11 @@ impl Pane {
         }
     }
 
-    /// Kill the child process.
+    /// Kill the child process and reap it to prevent zombies.
     pub fn kill(&mut self) {
         let _ = self.child.kill();
+        // Wait to reap the child process (prevent zombie)
+        let _ = self.child.wait();
         self.status = Status::Dead;
     }
 
