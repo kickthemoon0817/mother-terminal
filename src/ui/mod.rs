@@ -240,8 +240,8 @@ impl App {
             Span::styled(
                 " mtt ",
                 Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::White)
+                    .fg(Color::White)
+                    .bg(Color::Rgb(50, 23, 77))
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw("  "),
