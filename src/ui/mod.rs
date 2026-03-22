@@ -22,8 +22,6 @@ use crate::history::Recorder as HistoryRecorder;
 use crate::monitor::StallDetector;
 use crate::pane::{CLIType, Pane, Status};
 use crate::persist;
-use crate::usage::UsageTracker;
-
 const DEFAULT_SIDEBAR_WIDTH: u16 = 20;
 const MIN_SIDEBAR_WIDTH: u16 = 12;
 const MAX_SIDEBAR_WIDTH: u16 = 40;
@@ -64,6 +62,7 @@ pub struct App {
     tab_index: usize,
     message: String,
     should_quit: bool,
+    quit_with_save: bool, // true only when Ctrl+Q / :quit saves sessions
     last_ctrl_c: Option<Instant>,
     terminal_size: (u16, u16),
     sidebar_width: u16,
@@ -77,7 +76,6 @@ pub struct App {
     last_usage_fetch: Instant,
     home_cursor: usize,
     saved_sessions: Vec<persist::SessionInfo>,
-    usage: UsageTracker,
     history: Option<HistoryRecorder>,
     stall: StallDetector,
 }
@@ -95,6 +93,7 @@ impl App {
             tab_index: 0,
             message: String::new(),
             should_quit: false,
+            quit_with_save: false,
             last_ctrl_c: None,
             terminal_size: (80, 24),
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
@@ -108,7 +107,6 @@ impl App {
             last_usage_fetch: Instant::now() - Duration::from_secs(120), // trigger immediately
             home_cursor: 0,
             saved_sessions: persist::load_sessions(),
-            usage: UsageTracker::load(),
             history: HistoryRecorder::new().ok(),
             stall: StallDetector::new(),
         }
@@ -197,6 +195,11 @@ impl App {
             pane.kill();
         }
         self.panes.clear();
+
+        // Clear sessions.json unless Ctrl+Q saved them for restore
+        if !self.quit_with_save {
+            let _ = persist::save_sessions(&[]);
+        }
 
         // Cleanup terminal
         stdout().execute(DisableMouseCapture)?;
@@ -584,7 +587,7 @@ impl App {
             let display = self.cached_usage
                 .lock().ok()
                 .and_then(|c| c.get(name).cloned())
-                .unwrap_or_else(|| self.usage.format_usage(name));
+                .unwrap_or_else(|| "—".to_string());
             spans.push(Span::styled("● ", Style::default().fg(cli_color(cli))));
             spans.push(Span::styled(format!("{name} {display}"), Style::default().fg(Color::Gray)));
             if count > 0 {
@@ -1033,7 +1036,7 @@ impl App {
                     if self.panes[self.focused].status == Status::Active {
                         if double {
                             self.save_pane_to_history(self.focused);
-                            self.usage.end_session(self.panes[self.focused].cli.name());
+
                             self.panes[self.focused].kill();
                             self.panes.remove(self.focused);
                             if self.focused >= self.panes.len() && !self.panes.is_empty() {
@@ -1048,7 +1051,7 @@ impl App {
                         }
                     } else if double {
                         self.save_pane_to_history(self.focused);
-                        self.usage.end_session(self.panes[self.focused].cli.name());
+
                         self.panes[self.focused].kill();
                         self.panes.remove(self.focused);
                         if self.focused >= self.panes.len() && !self.panes.is_empty() {
@@ -1479,7 +1482,7 @@ impl App {
                     Ok(mut pane) => {
                         // Ensure PTY gets the correct size immediately
                         let _ = pane.resize(pane_rows.max(1), pane_cols.max(1));
-                        self.usage.start_session(cli.name());
+
                         self.message =
                             format!("spawned {} in {}", cli.name(), short_path(&cwd));
                         self.panes.push(pane);
@@ -1501,7 +1504,7 @@ impl App {
                 };
                 if let Some(idx) = target {
                     self.save_pane_to_history(idx);
-                    self.usage.end_session(self.panes[idx].cli.name());
+
                     self.stall.remove(&format!("{}", self.panes[idx].id));
                     self.panes[idx].kill();
                     self.panes.remove(idx);
@@ -1611,12 +1614,10 @@ impl App {
                 status: "killed".to_string(),
                 last_active: now,
             };
-            // Remove existing entry for same cwd+cli, add new one at front
+            // Update in-memory list only (sessions.json written only on Ctrl+Q)
             self.saved_sessions.retain(|s| !(s.cli_type == info.cli_type && s.cwd == info.cwd));
             self.saved_sessions.insert(0, info);
-            // Keep max 20
             self.saved_sessions.truncate(20);
-            let _ = persist::save_sessions(&self.saved_sessions);
         }
     }
 
@@ -1641,11 +1642,7 @@ impl App {
             .collect();
         let _ = persist::save_sessions(&sessions);
 
-        // End all usage sessions and save
-        self.usage.end_all();
-        self.usage.prune_old();
-        let _ = self.usage.save();
-
+        self.quit_with_save = true;
         self.should_quit = true;
     }
 
@@ -1668,7 +1665,7 @@ impl App {
             match Pane::spawn(id, cli, &info.cwd, pane_rows.max(10), pane_cols.max(20), &[]) {
                 Ok(mut pane) => {
                     let _ = pane.resize(pane_rows.max(1), pane_cols.max(1));
-                    self.usage.start_session(pane.cli.name());
+
                     self.panes.push(pane);
                 }
                 Err(_) => continue,

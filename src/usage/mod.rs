@@ -1,25 +1,6 @@
-use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
-
-/// A recorded usage session (start time + duration in seconds).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UsageEntry {
-    pub cli: String,
-    pub start_epoch: u64,
-    pub duration_secs: u64,
-}
-
-/// Tracks usage per CLI type with persistence.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct UsageTracker {
-    entries: Vec<UsageEntry>,
-    #[serde(skip)]
-    active: HashMap<String, u64>,
-}
 
 /// Unified usage data for any CLI.
 #[derive(Debug, Clone, Default)]
@@ -47,85 +28,6 @@ impl CLIUsage {
 }
 
 const CACHE_TTL_SECS: u64 = 60;
-
-// ── UsageTracker (session time tracking) ─────────────────────────────────
-
-impl UsageTracker {
-    pub fn new() -> Self {
-        Self { entries: Vec::new(), active: HashMap::new() }
-    }
-
-    pub fn load() -> Self {
-        let path = match usage_path() { Ok(p) => p, Err(_) => return Self::new() };
-        let data = match fs::read_to_string(&path) { Ok(d) => d, Err(_) => return Self::new() };
-        serde_json::from_str(&data).unwrap_or_else(|_| Self::new())
-    }
-
-    pub fn save(&self) -> Result<()> {
-        let path = usage_path()?;
-        let json = serde_json::to_string_pretty(self).context("serialize usage")?;
-        fs::write(&path, &json).context("write usage")?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
-        }
-        Ok(())
-    }
-
-    pub fn start_session(&mut self, cli: &str) { self.active.insert(cli.to_string(), now_epoch()); }
-
-    pub fn end_session(&mut self, cli: &str) {
-        if let Some(start) = self.active.remove(cli) {
-            self.entries.push(UsageEntry {
-                cli: cli.to_string(), start_epoch: start,
-                duration_secs: now_epoch().saturating_sub(start),
-            });
-        }
-    }
-
-    pub fn end_all(&mut self) {
-        let active: Vec<String> = self.active.keys().cloned().collect();
-        for cli in active { self.end_session(&cli); }
-    }
-
-    pub fn today_secs(&self, cli: &str) -> u64 {
-        let ts = today_start_epoch();
-        let mut total: u64 = self.entries.iter()
-            .filter(|e| e.cli == cli && e.start_epoch >= ts)
-            .map(|e| e.duration_secs).sum();
-        if let Some(&start) = self.active.get(cli) {
-            total += now_epoch().saturating_sub(start.max(ts));
-        }
-        total
-    }
-
-    pub fn week_secs(&self, cli: &str) -> u64 {
-        let ws = week_start_epoch();
-        let mut total: u64 = self.entries.iter()
-            .filter(|e| e.cli == cli && e.start_epoch >= ws)
-            .map(|e| e.duration_secs).sum();
-        if let Some(&start) = self.active.get(cli) {
-            total += now_epoch().saturating_sub(start.max(ws));
-        }
-        total
-    }
-
-    pub fn format_usage(&self, cli: &str) -> String {
-        let daily = self.today_secs(cli);
-        let weekly = self.week_secs(cli);
-        let (dh, dm) = (daily / 3600, (daily % 3600) / 60);
-        let (wh, wm) = (weekly / 3600, (weekly % 3600) / 60);
-        if weekly > 0 { format!("{dh}h{dm:02}m today {wh}h{wm:02}m week") }
-        else if daily > 0 { format!("{dh}h{dm:02}m today") }
-        else { "0m".to_string() }
-    }
-
-    pub fn prune_old(&mut self) {
-        let cutoff = now_epoch().saturating_sub(7 * 86400);
-        self.entries.retain(|e| e.start_epoch >= cutoff);
-    }
-}
 
 // ── Claude Usage (Anthropic OAuth API) ───────────────────────────────────
 
@@ -155,30 +57,22 @@ pub fn fetch_claude_usage() -> Option<CLIUsage> {
     Some(usage)
 }
 
-// ── Codex Usage (local app-server) ───────────────────────────────────────
+// ── Codex Usage (OpenAI) ─────────────────────────────────────────────────
 
 pub fn fetch_codex_usage() -> Option<CLIUsage> {
     if let Some(cached) = read_cache("codex") { return Some(cached); }
 
-    // Codex app-server exposes rate limits via its protocol.
-    // We read auth token and try the OpenAI chatgpt-backend or parse from screen.
-    // For now: read from ~/.codex/auth.json and try OpenAI usage endpoint.
     let home = dirs::home_dir()?;
     let auth_path = home.join(".codex/auth.json");
     let auth_data = fs::read_to_string(&auth_path).ok()?;
     let auth: serde_json::Value = serde_json::from_str(&auth_data).ok()?;
     let access_token = auth.get("tokens")?.get("access_token")?.as_str()?;
 
-    // Try OpenAI's internal usage endpoint (used by Codex app)
     let resp = curl_get("https://api.openai.com/v1/organization/usage", access_token)
-        .or_else(|| {
-            // Fallback: try chatgpt backend
-            curl_get("https://chatgpt.com/backend-api/accounts/check/v4-2023-04-27", access_token)
-        });
+        .or_else(|| curl_get("https://chatgpt.com/backend-api/accounts/check/v4-2023-04-27", access_token));
 
-    if let Some(resp) = resp {
-        // Parse rate limit info if available
-        if let Some(rate) = resp.get("rate_limits").or(resp.get("rateLimits")) {
+    if let Some(resp) = resp
+        && let Some(rate) = resp.get("rate_limits").or(resp.get("rateLimits")) {
             let primary = rate.get("primary")
                 .and_then(|p| p.get("usedPercent"))
                 .and_then(|v| v.as_u64())
@@ -196,7 +90,6 @@ pub fn fetch_codex_usage() -> Option<CLIUsage> {
             write_cache("codex", &usage);
             return Some(usage);
         }
-    }
 
     None
 }
@@ -216,21 +109,19 @@ pub fn fetch_gemini_usage() -> Option<CLIUsage> {
     // Check if token is expired and refresh if needed
     if let Some(expiry) = creds.get("expiry_date").and_then(|e| e.as_u64()) {
         let now_ms = now_epoch() * 1000;
-        if now_ms > expiry {
-            // Refresh the token
-            if let Some(refresh) = creds.get("refresh_token").and_then(|r| r.as_str()) {
+        if now_ms > expiry
+            && let Some(refresh) = creds.get("refresh_token").and_then(|r| r.as_str()) {
                 let body = format!(
                     r#"{{"client_id":"77185425430.apps.googleusercontent.com","client_secret":"OTJgUOQcT7lO7GsGZq2G4IlT","grant_type":"refresh_token","refresh_token":"{refresh}"}}"#
                 );
                 if let Some(resp) = curl_post_json("https://oauth2.googleapis.com/token", &body, None)
-                    && let Some(new_token) = resp.get("access_token").and_then(|t| t.as_str()) {
-                        access_token = new_token.to_string();
-                    }
+                    && let Some(new_token) = resp.get("access_token").and_then(|t| t.as_str())
+                {
+                    access_token = new_token.to_string();
+                }
             }
-        }
     }
 
-    // Call retrieveUserQuota
     let body = r#"{"project":"_"}"#;
     let resp = curl_post_json(
         "https://cloudcode-pa.googleapis.com/v1beta5:retrieveUserQuota",
@@ -241,7 +132,6 @@ pub fn fetch_gemini_usage() -> Option<CLIUsage> {
     let buckets = resp.get("buckets")?.as_array()?;
     if buckets.is_empty() { return None; }
 
-    // Find the most-used model's quota as representative
     let mut max_used: f64 = 0.0;
     for bucket in buckets {
         let fraction = bucket.get("remainingFraction").and_then(|f| f.as_f64()).unwrap_or(1.0);
@@ -323,11 +213,10 @@ fn read_json_field_from_file(path_str: &str, fields: &[&str]) -> Option<String> 
     val.as_str().map(|s| s.to_string())
 }
 
-
 fn format_remaining_from_percent(pct: u32, label: &str) -> String {
     let total_hours = match label {
         "5h" => 5.0,
-        "wk" => 35.0, // 5h * 7 days
+        "wk" => 35.0,
         "24h" => 24.0,
         _ => return format!("{}%", 100 - pct),
     };
@@ -368,23 +257,6 @@ fn write_cache(cli: &str, u: &CLIUsage) {
     }
 }
 
-// ── Time helpers ─────────────────────────────────────────────────────────
-
 fn now_epoch() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
-}
-
-fn today_start_epoch() -> u64 { let n = now_epoch(); n - (n % 86400) }
-
-fn week_start_epoch() -> u64 {
-    let n = now_epoch();
-    let dow = (n / 86400 + 4) % 7;
-    n - (n % 86400) - (dow * 86400)
-}
-
-fn usage_path() -> Result<PathBuf> {
-    let home = dirs::home_dir().context("no home dir")?;
-    let dir = home.join(".mtt");
-    fs::create_dir_all(&dir)?;
-    Ok(dir.join("usage.json"))
 }
