@@ -105,7 +105,7 @@ impl App {
             show_session_picker: false,
             picker_cursor: 0,
             cached_usage: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
-            last_usage_fetch: Instant::now(),
+            last_usage_fetch: Instant::now() - Duration::from_secs(120), // trigger immediately
             home_cursor: 0,
             saved_sessions: persist::load_sessions(),
             usage: UsageTracker::load(),
@@ -526,44 +526,16 @@ impl App {
             .borders(Borders::TOP)
             .border_style(Style::default().fg(Color::DarkGray))
             .title(Span::styled(
-                " usage & sessions ",
+                " sessions ",
                 Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD),
             ));
 
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
-        // Row 1: Usage limits per CLI
-        let mut limit_spans = vec![
-            Span::styled("  limits  ", Style::default().fg(Color::DarkGray)),
-        ];
-        for (cli, name, limit) in [
-            (CLIType::Claude, "claude", "5h"),
-            (CLIType::Codex, "codex", "5h"),
-            (CLIType::Gemini, "gemini", "4h"),
-            (CLIType::OpenCode, "opencode", "—"),
-        ] {
-            let count = self.panes.iter().filter(|p| p.cli == cli && p.status == Status::Active).count();
-            limit_spans.push(Span::styled(
-                format!("● {name}:{limit}"),
-                Style::default().fg(cli_color(cli)),
-            ));
-            if count > 0 {
-                limit_spans.push(Span::styled(
-                    format!("({count}) "),
-                    Style::default().fg(Color::Gray),
-                ));
-            }
-            limit_spans.push(Span::raw("  "));
-        }
-        if inner.height > 0 {
-            let row = Rect { x: inner.x, y: inner.y, width: inner.width, height: 1 };
-            frame.render_widget(Paragraph::new(Line::from(limit_spans)), row);
-        }
-
-        // Row 2+: Session list with numbers
+        // Session list
         for (i, pane) in self.panes.iter().enumerate() {
-            let row_y = inner.y + 1 + i as u16;
+            let row_y = inner.y + i as u16;
             if row_y >= inner.y + inner.height {
                 break;
             }
