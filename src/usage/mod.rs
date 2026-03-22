@@ -259,72 +259,6 @@ pub fn fetch_gemini_usage() -> Option<CLIUsage> {
     Some(usage)
 }
 
-// ── Antigravity Usage (Language Server gRPC) ─────────────────────────────
-
-pub fn fetch_antigravity_usage() -> Option<CLIUsage> {
-    if let Some(cached) = read_cache("antigravity") { return Some(cached); }
-
-    // Discover Antigravity Language Server process
-    let output = std::process::Command::new("ps")
-        .args(["aux"])
-        .output().ok()?;
-    let ps = String::from_utf8_lossy(&output.stdout);
-
-    let mut server_line = None;
-    for line in ps.lines() {
-        if line.contains("language_server_macos") || line.contains("language_server_linux") {
-            server_line = Some(line.to_string());
-            break;
-        }
-    }
-    let line = server_line?;
-
-    // Extract port and CSRF token from process args
-    // Format: --port=XXXXX --csrf_token=YYYYY
-    let port = extract_arg(&line, "--port=")?;
-    let csrf = extract_arg(&line, "--csrf_token=")
-        .or_else(|| extract_arg(&line, "--csrf-token="))?;
-
-    // Call GetUserStatus
-    let url = format!("https://localhost:{port}/exa.language_server_pb.LanguageServerService/GetUserStatus");
-    let output = std::process::Command::new("curl")
-        .args([
-            "-s", "-k", // -k for self-signed cert
-            "-X", "POST",
-            "-H", "Content-Type: application/json",
-            "-H", &format!("x-csrf-token: {csrf}"),
-            "-d", "{}",
-            &url,
-        ])
-        .output().ok()?;
-
-    if !output.status.success() { return None; }
-
-    let resp: serde_json::Value = serde_json::from_str(
-        &String::from_utf8_lossy(&output.stdout)
-    ).ok()?;
-
-    // Parse models and find the most-used quota
-    let models = resp.get("models").and_then(|m| m.as_object())?;
-    let mut max_used: f64 = 0.0;
-    for (_id, info) in models {
-        if let Some(quota) = info.get("quotaInfo") {
-            let remaining = quota.get("remainingFraction").and_then(|f| f.as_f64()).unwrap_or(1.0);
-            let used = 1.0 - remaining;
-            if used > max_used { max_used = used; }
-        }
-    }
-
-    let usage = CLIUsage {
-        primary_percent: (max_used * 100.0).min(100.0) as u32,
-        secondary_percent: None,
-        primary_label: "quota".into(),
-        secondary_label: String::new(),
-    };
-    write_cache("antigravity", &usage);
-    Some(usage)
-}
-
 // ── Unified format function ──────────────────────────────────────────────
 
 pub fn format_cli_usage(cli: &str) -> String {
@@ -332,7 +266,6 @@ pub fn format_cli_usage(cli: &str) -> String {
         "claude" => fetch_claude_usage(),
         "codex" => fetch_codex_usage(),
         "gemini" => fetch_gemini_usage(),
-        "opencode" => fetch_antigravity_usage(),
         _ => None,
     };
     match result {
@@ -390,12 +323,6 @@ fn read_json_field_from_file(path_str: &str, fields: &[&str]) -> Option<String> 
     val.as_str().map(|s| s.to_string())
 }
 
-fn extract_arg(line: &str, prefix: &str) -> Option<String> {
-    let start = line.find(prefix)? + prefix.len();
-    let rest = &line[start..];
-    let end = rest.find(|c: char| c.is_whitespace()).unwrap_or(rest.len());
-    Some(rest[..end].to_string())
-}
 
 fn format_remaining_from_percent(pct: u32, label: &str) -> String {
     let total_hours = match label {

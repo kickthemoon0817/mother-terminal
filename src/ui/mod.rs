@@ -14,6 +14,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
     Frame, Terminal,
 };
+use std::collections::HashMap;
 use std::io::stdout;
 use std::time::{Duration, Instant};
 
@@ -72,6 +73,8 @@ pub struct App {
     show_help: bool,
     show_session_picker: bool,
     picker_cursor: usize,
+    cached_usage: std::sync::Arc<std::sync::Mutex<HashMap<String, String>>>,
+    last_usage_fetch: Instant,
     home_cursor: usize,
     saved_sessions: Vec<persist::SessionInfo>,
     usage: UsageTracker,
@@ -101,6 +104,8 @@ impl App {
             show_help: false,
             show_session_picker: false,
             picker_cursor: 0,
+            cached_usage: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
+            last_usage_fetch: Instant::now(),
             home_cursor: 0,
             saved_sessions: persist::load_sessions(),
             usage: UsageTracker::load(),
@@ -130,6 +135,21 @@ impl App {
                     self.last_ctrl_c = None;
                     self.message.clear();
                 }
+
+            // Refresh usage data in background thread every 60s
+            if self.last_usage_fetch.elapsed() > Duration::from_secs(60) {
+                self.last_usage_fetch = Instant::now();
+                let cache = std::sync::Arc::clone(&self.cached_usage);
+                std::thread::spawn(move || {
+                    for name in ["claude", "codex", "gemini"] {
+                        let result = crate::usage::format_cli_usage(name);
+                        if result != "—"
+                            && let Ok(mut c) = cache.lock() {
+                                c.insert(name.to_string(), result);
+                            }
+                    }
+                });
+            }
 
             // Poll PTY output, record history, check stalls
             for pane in &mut self.panes {
@@ -582,21 +602,17 @@ impl App {
 
         let mut spans: Vec<Span> = vec![Span::raw(" ")];
 
-        // All CLIs: try real API usage, fallback to session time
+        // All CLIs: show cached API usage, fallback to session time
         for (cli, name) in [
             (CLIType::Claude, "claude"),
             (CLIType::Codex, "codex"),
             (CLIType::Gemini, "gemini"),
-            (CLIType::OpenCode, "opencode"),
         ] {
             let count = self.panes.iter().filter(|p| p.cli == cli).count();
-            let usage_str = crate::usage::format_cli_usage(name);
-            // If API returned "—", fallback to session time
-            let display = if usage_str == "—" {
-                self.usage.format_usage(name)
-            } else {
-                usage_str
-            };
+            let display = self.cached_usage
+                .lock().ok()
+                .and_then(|c| c.get(name).cloned())
+                .unwrap_or_else(|| self.usage.format_usage(name));
             spans.push(Span::styled("● ", Style::default().fg(cli_color(cli))));
             spans.push(Span::styled(format!("{name} {display}"), Style::default().fg(Color::Gray)));
             if count > 0 {
