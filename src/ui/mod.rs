@@ -72,6 +72,8 @@ pub struct App {
     show_help: bool,
     show_session_picker: bool,
     picker_cursor: usize,
+    home_cursor: usize,
+    saved_sessions: Vec<persist::SessionInfo>,
     usage: UsageTracker,
     history: Option<HistoryRecorder>,
     stall: StallDetector,
@@ -99,6 +101,8 @@ impl App {
             show_help: false,
             show_session_picker: false,
             picker_cursor: 0,
+            home_cursor: 0,
+            saved_sessions: persist::load_sessions(),
             usage: UsageTracker::load(),
             history: HistoryRecorder::new().ok(),
             stall: StallDetector::new(),
@@ -342,7 +346,14 @@ impl App {
     }
 
     fn draw_empty_state(&self, frame: &mut Frame, area: Rect) {
+        let w = area.width as usize;
         let mut lines: Vec<Line> = Vec::new();
+
+        // Horizontal bar
+        lines.push(Line::from(Span::styled(
+            "─".repeat(w),
+            Style::default().fg(Color::DarkGray),
+        )));
 
         lines.push(Line::from(Span::styled(
             "  Recent sessions",
@@ -350,41 +361,60 @@ impl App {
         )));
         lines.push(Line::from(""));
 
-        // Show history from recorder
-        if let Some(ref recorder) = self.history {
-            if let Ok(sessions) = recorder.list_sessions() {
-                if sessions.is_empty() {
-                    lines.push(Line::from(Span::styled(
-                        "  No session history yet.",
-                        Style::default().fg(Color::DarkGray),
-                    )));
-                } else {
-                    for name in sessions.iter().take(10) {
-                        let parts: Vec<&str> = name.splitn(2, '_').collect();
-                        let cli = parts.first().copied().unwrap_or("?");
-                        let color = match cli {
-                            "claude" => Color::Rgb(232, 149, 106),
-                            "codex" => Color::Rgb(52, 211, 153),
-                            "gemini" => Color::Rgb(251, 146, 60),
-                            _ => Color::Gray,
-                        };
-                        lines.push(Line::from(vec![
-                            Span::styled("  ● ", Style::default().fg(color)),
-                            Span::styled(name.to_string(), Style::default().fg(Color::Gray)),
-                        ]));
-                    }
-                }
-            }
-        } else {
+        let sessions = &self.saved_sessions;
+        if sessions.is_empty() {
             lines.push(Line::from(Span::styled(
                 "  No session history yet.",
                 Style::default().fg(Color::DarkGray),
             )));
+        } else {
+            for (i, info) in sessions.iter().take(15).enumerate() {
+                let is_selected = i == self.home_cursor;
+                let color = match info.cli_type.as_str() {
+                    "claude" => Color::Rgb(232, 149, 106),
+                    "codex" => Color::Rgb(52, 211, 153),
+                    "gemini" => Color::Rgb(251, 146, 60),
+                    _ => Color::Gray,
+                };
+
+                let dir = short_path(&info.cwd);
+                let date = format_epoch(info.last_active);
+
+                let marker = if is_selected { "▶" } else { " " };
+
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!(" {marker} "),
+                        if is_selected {
+                            Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default().fg(Color::DarkGray)
+                        },
+                    ),
+                    Span::styled("● ", Style::default().fg(color)),
+                    Span::styled(
+                        format!("{:<8}", info.cli_type),
+                        Style::default().fg(color),
+                    ),
+                    Span::styled(
+                        dir.to_string(),
+                        if is_selected {
+                            Style::default().fg(Color::White)
+                        } else {
+                            Style::default().fg(Color::Gray)
+                        },
+                    ),
+                    Span::styled(
+                        format!("  {date}"),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                ]));
+            }
         }
 
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
-            "  Type :spawn claude <dir> to start.",
+            "  ↑↓ select  Enter spawn  :spawn <cli> <dir> for new",
             Style::default().fg(Color::DarkGray),
         )));
 
@@ -1082,6 +1112,27 @@ impl App {
                     self.focused = idx - 1;
                 }
             }
+            // Home screen navigation when no panes
+            _ if self.panes.is_empty() && !self.saved_sessions.is_empty() => {
+                match key.code {
+                    KeyCode::Up => {
+                        if self.home_cursor > 0 {
+                            self.home_cursor -= 1;
+                        }
+                    }
+                    KeyCode::Down => {
+                        if self.home_cursor + 1 < self.saved_sessions.len() {
+                            self.home_cursor += 1;
+                        }
+                    }
+                    KeyCode::Enter => {
+                        let info = self.saved_sessions[self.home_cursor].clone();
+                        let cmd = format!("spawn {} {}", info.cli_type, info.cwd);
+                        self.execute_command(&cmd);
+                    }
+                    _ => {}
+                }
+            }
             // Everything else goes to the focused pane
             _ => {
                 if let Some(pane) = self.panes.get_mut(self.focused) {
@@ -1564,10 +1615,17 @@ impl App {
             .panes
             .iter()
             .filter(|p| p.status == Status::Active)
-            .map(|p| persist::SessionInfo {
-                cli_type: p.cli.name().to_string(),
-                cwd: p.cwd.clone(),
-                status: "saved".to_string(),
+            .map(|p| {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                persist::SessionInfo {
+                    cli_type: p.cli.name().to_string(),
+                    cwd: p.cwd.clone(),
+                    status: "saved".to_string(),
+                    last_active: now,
+                }
             })
             .collect();
         let _ = persist::save_sessions(&sessions);
@@ -1811,6 +1869,26 @@ fn is_wide_char(c: char) -> bool {
     || (0xFE30..=0xFE4F).contains(&cp) // CJK Forms
     || (0xFF00..=0xFF60).contains(&cp) // Fullwidth
     || (0x20000..=0x2FA1F).contains(&cp) // CJK Ext B+
+}
+
+fn format_epoch(epoch: u64) -> String {
+    if epoch == 0 {
+        return "—".to_string();
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let diff = now.saturating_sub(epoch);
+    if diff < 60 {
+        "just now".to_string()
+    } else if diff < 3600 {
+        format!("{}m ago", diff / 60)
+    } else if diff < 86400 {
+        format!("{}h ago", diff / 3600)
+    } else {
+        format!("{}d ago", diff / 86400)
+    }
 }
 
 fn cli_color(cli: CLIType) -> Color {

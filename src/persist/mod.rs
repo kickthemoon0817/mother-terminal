@@ -9,6 +9,8 @@ pub struct SessionInfo {
     pub cli_type: String,
     pub cwd: String,
     pub status: String,
+    #[serde(default)]
+    pub last_active: u64, // unix epoch seconds
 }
 
 /// Returns the path to `~/.mtt/sessions.json`, creating the directory if needed.
