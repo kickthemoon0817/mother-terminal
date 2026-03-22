@@ -582,27 +582,26 @@ impl App {
 
         let mut spans: Vec<Span> = vec![Span::raw(" ")];
 
-        for (cli, name) in [
-            (CLIType::Claude, "claude"),
-            (CLIType::Codex, "codex"),
-            (CLIType::Gemini, "gemini"),
-        ] {
+        // Claude: show real API usage from OMC cache
+        {
+            let count = self.panes.iter().filter(|p| p.cli == CLIType::Claude).count();
+            let usage_str = crate::usage::format_claude_api_usage();
+            spans.push(Span::styled("● ", Style::default().fg(cli_color(CLIType::Claude))));
+            spans.push(Span::styled(format!("claude {usage_str}"), Style::default().fg(Color::Gray)));
+            if count > 0 {
+                spans.push(Span::styled(format!(" [{count}]"), Style::default().fg(Color::White)));
+            }
+            spans.push(sep.clone());
+        }
+
+        // Codex & Gemini: show session time only (no API)
+        for (cli, name) in [(CLIType::Codex, "codex"), (CLIType::Gemini, "gemini")] {
             let count = self.panes.iter().filter(|p| p.cli == cli).count();
             let usage_str = self.usage.format_usage(name);
-
-            spans.push(Span::styled(
-                "● ".to_string(),
-                Style::default().fg(cli_color(cli)),
-            ));
-            spans.push(Span::styled(
-                format!("{name} {usage_str}"),
-                Style::default().fg(Color::Gray),
-            ));
+            spans.push(Span::styled("● ", Style::default().fg(cli_color(cli))));
+            spans.push(Span::styled(format!("{name} {usage_str}"), Style::default().fg(Color::Gray)));
             if count > 0 {
-                spans.push(Span::styled(
-                    format!(" [{count}]"),
-                    Style::default().fg(Color::White),
-                ));
+                spans.push(Span::styled(format!(" [{count}]"), Style::default().fg(Color::White)));
             }
             spans.push(sep.clone());
         }
@@ -1046,6 +1045,7 @@ impl App {
                 if !self.panes.is_empty() && self.focused < self.panes.len() {
                     if self.panes[self.focused].status == Status::Active {
                         if double {
+                            self.save_pane_to_history(self.focused);
                             self.usage.end_session(self.panes[self.focused].cli.name());
                             self.panes[self.focused].kill();
                             self.panes.remove(self.focused);
@@ -1060,6 +1060,7 @@ impl App {
                             self.last_ctrl_c = Some(Instant::now());
                         }
                     } else if double {
+                        self.save_pane_to_history(self.focused);
                         self.usage.end_session(self.panes[self.focused].cli.name());
                         self.panes[self.focused].kill();
                         self.panes.remove(self.focused);
@@ -1512,6 +1513,7 @@ impl App {
                     None
                 };
                 if let Some(idx) = target {
+                    self.save_pane_to_history(idx);
                     self.usage.end_session(self.panes[idx].cli.name());
                     self.stall.remove(&format!("{}", self.panes[idx].id));
                     self.panes[idx].kill();
@@ -1606,6 +1608,28 @@ impl App {
             _ => {
                 self.message = format!("unknown command: {}", parts[0]);
             }
+        }
+    }
+
+    fn save_pane_to_history(&mut self, idx: usize) {
+        if idx < self.panes.len() {
+            let pane = &self.panes[idx];
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let info = persist::SessionInfo {
+                cli_type: pane.cli.name().to_string(),
+                cwd: pane.cwd.clone(),
+                status: "killed".to_string(),
+                last_active: now,
+            };
+            // Remove existing entry for same cwd+cli, add new one at front
+            self.saved_sessions.retain(|s| !(s.cli_type == info.cli_type && s.cwd == info.cwd));
+            self.saved_sessions.insert(0, info);
+            // Keep max 20
+            self.saved_sessions.truncate(20);
+            let _ = persist::save_sessions(&self.saved_sessions);
         }
     }
 
