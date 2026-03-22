@@ -200,9 +200,7 @@ impl App {
         self.draw_usage_bar(frame, outer[2]);
 
         if self.panes.is_empty() {
-            let msg = Paragraph::new("  No sessions. Type :spawn claude <dir> to start.")
-                .style(Style::default().fg(Color::DarkGray));
-            frame.render_widget(msg, outer[1]);
+            self.draw_empty_state(frame, outer[1]);
         } else {
             // Optional extra bottom panel (usage/limits)
             let main_area = if self.show_bottom_panel {
@@ -266,17 +264,18 @@ impl App {
     fn draw_status_bar(&self, frame: &mut Frame, area: Rect) {
         let active = self.panes.iter().filter(|p| p.status == Status::Active).count();
         let stalled = self.panes.iter().filter(|p| p.status == Status::Stalled).count();
-        let total = self.panes.len();
 
         let mut spans = vec![
             Span::styled(
-                " mtt 0.0.19 ",
+                " mtt",
                 Style::default()
-                    .fg(Color::White)
-                    .bg(Color::Rgb(50, 23, 77))
+                    .fg(Color::Rgb(120, 80, 170))
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::raw("  "),
+            Span::styled(
+                " 0.0.19 ",
+                Style::default().fg(Color::DarkGray),
+            ),
         ];
 
         if active > 0 {
@@ -338,9 +337,59 @@ impl App {
             ));
         }
 
-        let bar = Paragraph::new(Line::from(spans))
-            .style(Style::default().bg(Color::Rgb(30, 30, 30)));
+        let bar = Paragraph::new(Line::from(spans));
         frame.render_widget(bar, area);
+    }
+
+    fn draw_empty_state(&self, frame: &mut Frame, area: Rect) {
+        let mut lines: Vec<Line> = Vec::new();
+
+        lines.push(Line::from(Span::styled(
+            "  Recent sessions",
+            Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(""));
+
+        // Show history from recorder
+        if let Some(ref recorder) = self.history {
+            if let Ok(sessions) = recorder.list_sessions() {
+                if sessions.is_empty() {
+                    lines.push(Line::from(Span::styled(
+                        "  No session history yet.",
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                } else {
+                    for name in sessions.iter().take(10) {
+                        let parts: Vec<&str> = name.splitn(2, '_').collect();
+                        let cli = parts.first().copied().unwrap_or("?");
+                        let color = match cli {
+                            "claude" => Color::Rgb(232, 149, 106),
+                            "codex" => Color::Rgb(52, 211, 153),
+                            "gemini" => Color::Rgb(251, 146, 60),
+                            _ => Color::Gray,
+                        };
+                        lines.push(Line::from(vec![
+                            Span::styled("  ● ", Style::default().fg(color)),
+                            Span::styled(name.to_string(), Style::default().fg(Color::Gray)),
+                        ]));
+                    }
+                }
+            }
+        } else {
+            lines.push(Line::from(Span::styled(
+                "  No session history yet.",
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "  Type :spawn claude <dir> to start.",
+            Style::default().fg(Color::DarkGray),
+        )));
+
+        let para = Paragraph::new(lines);
+        frame.render_widget(para, area);
     }
 
     fn draw_sidebar(&self, frame: &mut Frame, area: Rect) {
