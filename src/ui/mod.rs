@@ -277,10 +277,6 @@ impl App {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw("  "),
-            Span::styled(
-                format!("{total} sessions"),
-                Style::default().fg(Color::DarkGray),
-            ),
         ];
 
         if active > 0 {
