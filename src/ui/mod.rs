@@ -582,24 +582,23 @@ impl App {
 
         let mut spans: Vec<Span> = vec![Span::raw(" ")];
 
-        // Claude: show real API usage from OMC cache
-        {
-            let count = self.panes.iter().filter(|p| p.cli == CLIType::Claude).count();
-            let usage_str = crate::usage::format_claude_api_usage();
-            spans.push(Span::styled("● ", Style::default().fg(cli_color(CLIType::Claude))));
-            spans.push(Span::styled(format!("claude {usage_str}"), Style::default().fg(Color::Gray)));
-            if count > 0 {
-                spans.push(Span::styled(format!(" [{count}]"), Style::default().fg(Color::White)));
-            }
-            spans.push(sep.clone());
-        }
-
-        // Codex & Gemini: show session time only (no API)
-        for (cli, name) in [(CLIType::Codex, "codex"), (CLIType::Gemini, "gemini")] {
+        // All CLIs: try real API usage, fallback to session time
+        for (cli, name) in [
+            (CLIType::Claude, "claude"),
+            (CLIType::Codex, "codex"),
+            (CLIType::Gemini, "gemini"),
+            (CLIType::OpenCode, "opencode"),
+        ] {
             let count = self.panes.iter().filter(|p| p.cli == cli).count();
-            let usage_str = self.usage.format_usage(name);
+            let usage_str = crate::usage::format_cli_usage(name);
+            // If API returned "—", fallback to session time
+            let display = if usage_str == "—" {
+                self.usage.format_usage(name)
+            } else {
+                usage_str
+            };
             spans.push(Span::styled("● ", Style::default().fg(cli_color(cli))));
-            spans.push(Span::styled(format!("{name} {usage_str}"), Style::default().fg(Color::Gray)));
+            spans.push(Span::styled(format!("{name} {display}"), Style::default().fg(Color::Gray)));
             if count > 0 {
                 spans.push(Span::styled(format!(" [{count}]"), Style::default().fg(Color::White)));
             }
