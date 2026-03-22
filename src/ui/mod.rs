@@ -270,7 +270,7 @@ impl App {
 
         let mut spans = vec![
             Span::styled(
-                " mtt ",
+                " mtt 0.0.19 ",
                 Style::default()
                     .fg(Color::White)
                     .bg(Color::Rgb(50, 23, 77))
@@ -350,13 +350,7 @@ impl App {
     fn draw_sidebar(&self, frame: &mut Frame, area: Rect) {
         let block = Block::default()
             .borders(Borders::RIGHT)
-            .border_style(Style::default().fg(Color::DarkGray))
-            .title(Span::styled(
-                " sessions ",
-                Style::default()
-                    .fg(Color::Gray)
-                    .add_modifier(Modifier::BOLD),
-            ));
+            .border_style(Style::default().fg(Color::DarkGray));
 
         let inner = block.inner(area);
         frame.render_widget(block, area);
