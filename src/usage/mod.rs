@@ -1,3 +1,4 @@
+use log::{debug, warn};
 use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -34,17 +35,45 @@ const CACHE_TTL_SECS: u64 = 60;
 const CLAUDE_OAUTH_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 
 pub fn fetch_claude_usage() -> Option<CLIUsage> {
-    if let Some(cached) = read_cache("claude") { return Some(cached); }
+    if let Some(cached) = read_cache("claude") {
+        debug!("claude usage: from cache");
+        return Some(cached);
+    }
 
+    debug!("claude usage: fetching from API");
     let refresh = read_json_field_from_keychain("Claude Code-credentials", &["claudeAiOauth", "refreshToken"])
-        .or_else(|| read_json_field_from_file("~/.claude/.credentials.json", &["claudeAiOauth", "refreshToken"]))?;
+        .or_else(|| read_json_field_from_file("~/.claude/.credentials.json", &["claudeAiOauth", "refreshToken"]));
+    if refresh.is_none() {
+        warn!("claude usage: no refresh token found in keychain or credentials file");
+        return None;
+    }
+    let refresh = refresh?;
 
     let body = format!(r#"{{"grant_type":"refresh_token","refresh_token":"{refresh}","client_id":"{CLAUDE_OAUTH_CLIENT_ID}"}}"#);
-    let token = curl_post_json("https://platform.claude.com/v1/oauth/token", &body, None)
-        .and_then(|r| r.get("access_token")?.as_str().map(|s| s.to_string()))?;
+    let token_resp = curl_post_json("https://platform.claude.com/v1/oauth/token", &body, None);
+    if token_resp.is_none() {
+        warn!("claude usage: token refresh failed");
+        return None;
+    }
+    let token = token_resp.and_then(|r| r.get("access_token")?.as_str().map(|s| s.to_string()));
+    if token.is_none() {
+        warn!("claude usage: no access_token in refresh response");
+        return None;
+    }
+    let token = token?;
+    debug!("claude usage: got access token");
 
-    let resp = curl_get("https://api.anthropic.com/api/oauth/usage", &token)?;
-    if resp.get("error").is_some() { return None; }
+    let resp = curl_get("https://api.anthropic.com/api/oauth/usage", &token);
+    if resp.is_none() {
+        warn!("claude usage: API call failed");
+        return None;
+    }
+    let resp = resp?;
+    if resp.get("error").is_some() {
+        warn!("claude usage: API returned error: {:?}", resp.get("error"));
+        return None;
+    }
+    debug!("claude usage: API response ok");
 
     let five = (resp.get("five_hour")?.get("utilization")?.as_f64()? * 100.0).min(100.0) as u32;
     let week = (resp.get("seven_day")?.get("utilization")?.as_f64()? * 100.0).min(100.0) as u32;
@@ -60,7 +89,8 @@ pub fn fetch_claude_usage() -> Option<CLIUsage> {
 // ── Codex Usage (OpenAI) ─────────────────────────────────────────────────
 
 pub fn fetch_codex_usage() -> Option<CLIUsage> {
-    if let Some(cached) = read_cache("codex") { return Some(cached); }
+    if let Some(cached) = read_cache("codex") { debug!("codex usage: from cache"); return Some(cached); }
+    debug!("codex usage: fetching");
 
     let home = dirs::home_dir()?;
     let auth_path = home.join(".codex/auth.json");
@@ -97,7 +127,8 @@ pub fn fetch_codex_usage() -> Option<CLIUsage> {
 // ── Gemini Usage (Google Cloud Code Assist API) ──────────────────────────
 
 pub fn fetch_gemini_usage() -> Option<CLIUsage> {
-    if let Some(cached) = read_cache("gemini") { return Some(cached); }
+    if let Some(cached) = read_cache("gemini") { debug!("gemini usage: from cache"); return Some(cached); }
+    debug!("gemini usage: fetching");
 
     let home = dirs::home_dir()?;
     let cred_path = home.join(".gemini/oauth_creds.json");
@@ -159,8 +190,15 @@ pub fn format_cli_usage(cli: &str) -> String {
         _ => None,
     };
     match result {
-        Some(u) => u.format(),
-        None => "—".to_string(),
+        Some(u) => {
+            let s = u.format();
+            debug!("usage for {cli}: {s}");
+            s
+        }
+        None => {
+            debug!("usage for {cli}: unavailable (—)");
+            "—".to_string()
+        }
     }
 }
 

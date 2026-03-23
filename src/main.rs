@@ -8,12 +8,21 @@ mod ui;
 mod usage;
 
 use crate::ui::App;
+use log::info;
+use simplelog::{Config, LevelFilter, WriteLogger};
+use std::fs::File;
 
 fn main() -> anyhow::Result<()> {
+    // Init file logger → ~/.mtt/mtt.log
+    let home = dirs::home_dir().unwrap_or_default();
+    let log_dir = home.join(".mtt");
+    std::fs::create_dir_all(&log_dir)?;
+    let log_file = File::create(log_dir.join("mtt.log"))?;
+    let _ = WriteLogger::init(LevelFilter::Debug, Config::default(), log_file);
+
+    info!("mtt starting");
+
     let mut app = App::new();
-
-    // Restore previous sessions if any were saved
     app.restore_sessions();
-
     app.run()
 }
