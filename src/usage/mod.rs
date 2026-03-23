@@ -28,7 +28,7 @@ impl CLIUsage {
     }
 }
 
-const CACHE_TTL_SECS: u64 = 60;
+const CACHE_TTL_SECS: u64 = 300; // 5 minutes — avoids rate limits on token refresh
 
 // ── Claude Usage (Anthropic OAuth API) ───────────────────────────────────
 
@@ -52,10 +52,12 @@ pub fn fetch_claude_usage() -> Option<CLIUsage> {
     let body = format!(r#"{{"grant_type":"refresh_token","refresh_token":"{refresh}","client_id":"{CLAUDE_OAUTH_CLIENT_ID}"}}"#);
     let token_resp = curl_post_json("https://platform.claude.com/v1/oauth/token", &body, None);
     if token_resp.is_none() {
-        warn!("claude usage: token refresh failed");
+        warn!("claude usage: token refresh request failed (curl error)");
         return None;
     }
-    let token = token_resp.and_then(|r| r.get("access_token")?.as_str().map(|s| s.to_string()));
+    let token_resp = token_resp.unwrap();
+    debug!("claude usage: refresh response: {}", token_resp);
+    let token = token_resp.get("access_token").and_then(|t| t.as_str()).map(|s| s.to_string());
     if token.is_none() {
         warn!("claude usage: no access_token in refresh response");
         return None;
@@ -86,42 +88,108 @@ pub fn fetch_claude_usage() -> Option<CLIUsage> {
     Some(usage)
 }
 
-// ── Codex Usage (OpenAI) ─────────────────────────────────────────────────
+// ── Codex Usage (parsed from screen) ─────────────────────────────────────
 
 pub fn fetch_codex_usage() -> Option<CLIUsage> {
     if let Some(cached) = read_cache("codex") { debug!("codex usage: from cache"); return Some(cached); }
-    debug!("codex usage: fetching");
-
-    let home = dirs::home_dir()?;
-    let auth_path = home.join(".codex/auth.json");
-    let auth_data = fs::read_to_string(&auth_path).ok()?;
-    let auth: serde_json::Value = serde_json::from_str(&auth_data).ok()?;
-    let access_token = auth.get("tokens")?.get("access_token")?.as_str()?;
-
-    let resp = curl_get("https://api.openai.com/v1/organization/usage", access_token)
-        .or_else(|| curl_get("https://chatgpt.com/backend-api/accounts/check/v4-2023-04-27", access_token));
-
-    if let Some(resp) = resp
-        && let Some(rate) = resp.get("rate_limits").or(resp.get("rateLimits")) {
-            let primary = rate.get("primary")
-                .and_then(|p| p.get("usedPercent"))
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as u32;
-            let secondary = rate.get("secondary")
-                .and_then(|p| p.get("usedPercent"))
-                .and_then(|v| v.as_u64());
-
-            let usage = CLIUsage {
-                primary_percent: primary,
-                secondary_percent: secondary.map(|s| s as u32),
-                primary_label: "5h".into(),
-                secondary_label: "wk".into(),
-            };
-            write_cache("codex", &usage);
-            return Some(usage);
-        }
-
+    // No public API — usage parsed from screen in parse_usage_from_screen()
+    debug!("codex usage: no API, relies on screen parsing");
     None
+}
+
+/// Parse usage info from a pane's screen text.
+/// Recognizes patterns from Claude, Codex, and Gemini status lines.
+pub fn parse_usage_from_screen(cli: &str, screen_text: &str) -> Option<CLIUsage> {
+    match cli {
+        "claude" => parse_claude_screen(screen_text),
+        "codex" => parse_codex_screen(screen_text),
+        "gemini" => parse_gemini_screen(screen_text),
+        _ => None,
+    }
+}
+
+/// Parse Claude's OMC status line: "5h:16%(3h3m) wk:42%(4d11h)"
+fn parse_claude_screen(text: &str) -> Option<CLIUsage> {
+    for line in text.lines().rev() {
+        // Look for "Xh:XX%(" pattern
+        if let Some(pos) = line.find("h:")
+            && pos > 0 {
+                let before = &line[..pos];
+                let digit_start = before.rfind(|c: char| !c.is_ascii_digit()).map(|p| p + 1).unwrap_or(0);
+                let after_h = &line[pos + 2..];
+
+                // Parse primary: XX%(
+                if let Some(pct_end) = after_h.find('%') {
+                    let primary_pct: u32 = after_h[..pct_end].parse().ok()?;
+
+                    // Look for weekly: wk:XX%(
+                    let secondary = if let Some(wk_pos) = line.find("wk:") {
+                        let wk_after = &line[wk_pos + 3..];
+                        if let Some(wk_pct_end) = wk_after.find('%') {
+                            wk_after[..wk_pct_end].parse().ok()
+                        } else { None }
+                    } else { None };
+
+                    let _label = &line[digit_start..pos];
+                    return Some(CLIUsage {
+                        primary_percent: primary_pct,
+                        secondary_percent: secondary,
+                        primary_label: "5h".into(),
+                        secondary_label: "wk".into(),
+                    });
+                }
+            }
+    }
+    None
+}
+
+/// Parse Codex status line: "XX% left" or "gpt-5.4 low · 99% left"
+fn parse_codex_screen(text: &str) -> Option<CLIUsage> {
+    for line in text.lines().rev() {
+        if let Some(pos) = line.find("% left") {
+            // Walk backwards to find the number
+            let before = line[..pos].trim_end();
+            let num_start = before.rfind(|c: char| !c.is_ascii_digit()).map(|p| p + 1).unwrap_or(0);
+            let pct_left: u32 = before[num_start..].parse().ok()?;
+            let pct_used = 100u32.saturating_sub(pct_left);
+            return Some(CLIUsage {
+                primary_percent: pct_used,
+                secondary_percent: None,
+                primary_label: "5h".into(),
+                secondary_label: String::new(),
+            });
+        }
+    }
+    None
+}
+
+/// Parse Gemini /stats session output: "gemini-2.5-pro    -    ▬▬▬▬▬    XX%  3:16 AM (24h)"
+fn parse_gemini_screen(text: &str) -> Option<CLIUsage> {
+    let mut max_used: u32 = 0;
+    let mut found = false;
+    for line in text.lines() {
+        // Look for "XX%  HH:MM" pattern in model stats
+        if line.contains("gemini-") || line.contains("Gemini") {
+            // Find XX% pattern
+            for word in line.split_whitespace() {
+                if word.ends_with('%')
+                    && let Ok(pct) = word.trim_end_matches('%').parse::<u32>() {
+                        if pct > max_used { max_used = pct; }
+                        found = true;
+                    }
+            }
+        }
+    }
+    if found {
+        Some(CLIUsage {
+            primary_percent: max_used,
+            secondary_percent: None,
+            primary_label: "24h".into(),
+            secondary_label: String::new(),
+        })
+    } else {
+        None
+    }
 }
 
 // ── Gemini Usage (Google Cloud Code Assist API) ──────────────────────────

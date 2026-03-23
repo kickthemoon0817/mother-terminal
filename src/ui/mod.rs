@@ -158,6 +158,11 @@ impl App {
                         let name = format!("{}_{}", pane.cli.name(), pane.id);
                         let _ = recorder.record(&name, &text);
                     }
+                    // Parse usage from screen output
+                    if let Some(screen_usage) = crate::usage::parse_usage_from_screen(pane.cli.name(), &text)
+                        && let Ok(mut c) = self.cached_usage.lock() {
+                            c.insert(pane.cli.name().to_string(), screen_usage.format());
+                        }
                     // Check for stalls
                     let stall = self.stall.check(&format!("{}", pane.id), &text);
                     if let crate::monitor::StallStatus::Stalled { .. } = stall {
