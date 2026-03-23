@@ -846,43 +846,76 @@ impl App {
         // Render the virtual terminal screen
         let screen = pane.screen();
         let (screen_rows, screen_cols) = screen.size();
+        let in_scroll = matches!(self.mode, Mode::Scroll) && is_focused && pane.scroll_offset > 0;
 
-        // In scroll mode, replay raw history into a tall virtual terminal
-        let scroll_parser;
-        let render_screen = if matches!(self.mode, Mode::Scroll) && is_focused && pane.scroll_offset > 0 {
-            scroll_parser = pane.scrollback_screen(screen_rows, screen_cols);
-            if let Some(ref sp) = scroll_parser {
-                sp.screen()
-            } else {
-                screen
+        // In scroll mode, render scrollback lines above the live screen
+        if in_scroll {
+            let sb_len = pane.scrollback.len();
+            let offset = pane.scroll_offset;
+            let visible = inner.height as usize;
+
+            for display_row in 0..inner.height {
+                // Which scrollback line to show
+                // offset=1 means show 1 line of scrollback at top, rest is live screen
+                let sb_idx = if offset >= visible {
+                    // All scrollback
+                    sb_len.saturating_sub(offset) + display_row as usize
+                } else {
+                    // Mix: top rows are scrollback, bottom rows are live screen
+                    let sb_rows = offset.min(visible);
+                    if (display_row as usize) < sb_rows {
+                        sb_len.saturating_sub(offset) + display_row as usize
+                    } else {
+                        // Render live screen row
+                        let live_row = display_row as usize - sb_rows;
+                        let buf = frame.buffer_mut();
+                        let mut col: u16 = 0;
+                        while col < inner.width.min(screen_cols) {
+                            if let Some(cell) = screen.cell(live_row as u16, col) {
+                                let ch = cell.contents();
+                                let fg = convert_vt100_color(cell.fgcolor());
+                                let bg = convert_vt100_color(cell.bgcolor());
+                                if !ch.is_empty() || bg != Color::Reset {
+                                    let mut style = Style::default();
+                                    if fg != Color::Reset { style = style.fg(fg); }
+                                    if bg != Color::Reset { style = style.bg(bg); }
+                                    if cell.bold() { style = style.add_modifier(Modifier::BOLD); }
+                                    if let Some(buf_cell) = buf.cell_mut((inner.x + col, inner.y + display_row)) {
+                                        buf_cell.set_symbol(&ch);
+                                        buf_cell.set_style(style);
+                                    }
+                                }
+                                col += if ch.chars().any(is_wide_char) { 2 } else { 1 };
+                            } else { col += 1; }
+                        }
+                        continue;
+                    }
+                };
+
+                if sb_idx < sb_len {
+                    let line = &pane.scrollback[sb_idx];
+                    let buf = frame.buffer_mut();
+                    for (c, sc) in line.cells.iter().enumerate() {
+                        if c as u16 >= inner.width { break; }
+                        let mut style = Style::default();
+                        let fg = convert_vt100_color(sc.fg);
+                        let bg = convert_vt100_color(sc.bg);
+                        if fg != Color::Reset { style = style.fg(fg); }
+                        if bg != Color::Reset { style = style.bg(bg); }
+                        if sc.bold { style = style.add_modifier(Modifier::BOLD); }
+                        if let Some(buf_cell) = buf.cell_mut((inner.x + c as u16, inner.y + display_row)) {
+                            buf_cell.set_symbol(&sc.ch);
+                            buf_cell.set_style(style);
+                        }
+                    }
+                }
             }
         } else {
-            screen
-        };
-
-        // Determine which rows to render when scrolling
-        let (render_rows, render_cols) = render_screen.size();
-        let start_row = if matches!(self.mode, Mode::Scroll) && is_focused && pane.scroll_offset > 0 {
-            // Find the cursor row (last content row) in the tall screen
-            let (cursor_row, _) = render_screen.cursor_position();
-            let visible = inner.height.min(render_rows);
-            // Base = cursor at bottom of view, scroll_offset moves up
-            cursor_row
-                .saturating_sub(visible)
-                .saturating_add(1)
-                .saturating_sub(pane.scroll_offset as u16)
-        } else {
-            0
-        };
-
-        for display_row in 0..inner.height.min(render_rows) {
-            let src_row = start_row + display_row;
-            if src_row >= render_rows {
-                break;
-            }
-            let mut col: u16 = 0;
-            while col < inner.width.min(render_cols) {
-                if let Some(cell) = render_screen.cell(src_row, col) {
+            // Normal mode: render live screen directly
+            for display_row in 0..inner.height.min(screen_rows) {
+                let mut col: u16 = 0;
+                while col < inner.width.min(screen_cols) {
+                    if let Some(cell) = screen.cell(display_row, col) {
                     let ch = cell.contents();
                     let fg = convert_vt100_color(cell.fgcolor());
                     let bg = convert_vt100_color(cell.bgcolor());
@@ -922,6 +955,7 @@ impl App {
                 }
             }
         }
+        } // end else (normal mode)
 
         // Hide the hardware cursor — let the AI CLI render its own cursor
         // via the vt100 screen content (it draws its own cursor character)
@@ -1257,9 +1291,7 @@ impl App {
             }
             KeyCode::Up | KeyCode::Char('k') => {
                 if let Some(pane) = self.panes.get_mut(self.focused) {
-                    let (cols, rows) = self.terminal_size;
-                    let visible = rows.saturating_sub(4);
-                    let max = pane.max_scroll(visible, cols.saturating_sub(self.sidebar_width + 2));
+                    let max = pane.max_scroll();
                     pane.scroll_offset = (pane.scroll_offset + 1).min(max);
                 }
             }
@@ -1275,9 +1307,7 @@ impl App {
             }
             KeyCode::PageUp => {
                 if let Some(pane) = self.panes.get_mut(self.focused) {
-                    let (cols, rows) = self.terminal_size;
-                    let visible = rows.saturating_sub(4);
-                    let max = pane.max_scroll(visible, cols.saturating_sub(self.sidebar_width + 2));
+                    let max = pane.max_scroll();
                     pane.scroll_offset = (pane.scroll_offset + 20).min(max);
                 }
             }
@@ -1355,9 +1385,7 @@ impl App {
                     self.mode = Mode::Scroll;
                 }
                 if let Some(pane) = self.panes.get_mut(self.focused) {
-                    let (_, rows) = self.terminal_size;
-                    let visible = rows.saturating_sub(4);
-                    let max = pane.max_scroll(visible, self.terminal_size.0.saturating_sub(self.sidebar_width + 2));
+                    let max = pane.max_scroll();
                     pane.scroll_offset = (pane.scroll_offset + 1).min(max);
                 }
             }

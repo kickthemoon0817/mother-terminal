@@ -42,6 +42,20 @@ pub enum Status {
     Dead,
 }
 
+/// A pre-rendered scrollback line with per-cell color info.
+#[derive(Clone)]
+pub struct ScrollLine {
+    pub cells: Vec<ScrollCell>,
+}
+
+#[derive(Clone)]
+pub struct ScrollCell {
+    pub ch: String,
+    pub fg: vt100::Color,
+    pub bg: vt100::Color,
+    pub bold: bool,
+}
+
 /// A pane holding an AI CLI session with its PTY and virtual screen.
 pub struct Pane {
     pub id: usize,
@@ -50,11 +64,13 @@ pub struct Pane {
     pub status: Status,
     pub started: Instant,
     pub scroll_offset: usize,
+    pub scrollback: Vec<ScrollLine>, // pre-rendered lines for instant scroll
 
     writer: Box<dyn Write + Send>,
     buffer: Arc<Mutex<Vec<u8>>>,
-    raw_history: Arc<Mutex<Vec<u8>>>,
+    _raw_history: Arc<Mutex<Vec<u8>>>,
     parser: vt100::Parser,
+    last_top_line: String, // detect when top line scrolls off
     master: Box<dyn MasterPty + Send>,
     child: Box<dyn portable_pty::Child + Send>,
 }
@@ -120,10 +136,12 @@ impl Pane {
             status: Status::Active,
             started: Instant::now(),
             scroll_offset: 0,
+            scrollback: Vec::new(),
             writer,
             buffer,
-            raw_history,
+            _raw_history: raw_history,
             parser: vt100::Parser::new(rows, cols, 1000),
+            last_top_line: String::new(),
             master: pair.master,
             child,
         })
@@ -145,7 +163,45 @@ impl Pane {
             data
         };
 
+        // Capture top line before processing (to detect scroll)
+        let screen = self.parser.screen();
+        let cols = screen.size().1;
+        let mut old_top = String::new();
+        for col in 0..cols {
+            if let Some(cell) = screen.cell(0, col) {
+                old_top.push_str(&cell.contents());
+            }
+        }
+
         self.parser.process(&data);
+
+        // If top line changed, the old one scrolled off — save it to scrollback
+        let screen = self.parser.screen();
+        let mut new_top = String::new();
+        for col in 0..cols {
+            if let Some(cell) = screen.cell(0, col) {
+                new_top.push_str(&cell.contents());
+            }
+        }
+
+        if !self.last_top_line.is_empty() && old_top != new_top && old_top != self.last_top_line {
+            // Capture the old top line with colors
+            // (we already lost the cells, so use last_top_line as plain text)
+            let cells: Vec<ScrollCell> = self.last_top_line.chars().map(|c| ScrollCell {
+                ch: c.to_string(),
+                fg: vt100::Color::Default,
+                bg: vt100::Color::Default,
+                bold: false,
+            }).collect();
+            self.scrollback.push(ScrollLine { cells });
+
+            // Cap scrollback at 5000 lines
+            if self.scrollback.len() > 5000 {
+                self.scrollback.drain(..1000);
+            }
+        }
+        self.last_top_line = new_top;
+
         true
     }
 
@@ -196,35 +252,11 @@ impl Pane {
         }
     }
 
-    /// Get a scrollback screen by replaying raw history into a tall virtual terminal.
-    /// Returns (parser, total_rows) where you can access cells from the parser's screen.
-    pub fn scrollback_screen(&self, visible_rows: u16, cols: u16) -> Option<vt100::Parser> {
-        let hist = self.raw_history.lock().ok()?;
-        if hist.is_empty() {
-            return None;
-        }
-        // Create a tall parser to hold all output
-        let tall_rows = visible_rows.saturating_mul(10).max(500);
-        let mut tall_parser = vt100::Parser::new(tall_rows, cols, 0);
-        tall_parser.process(&hist);
-        Some(tall_parser)
+    /// Get the maximum scroll offset (number of scrollback lines).
+    pub fn max_scroll(&self) -> usize {
+        self.scrollback.len()
     }
 
-    /// Get the maximum scroll offset based on raw history content.
-    pub fn max_scroll(&self, visible_rows: u16, cols: u16) -> usize {
-        let hist = match self.raw_history.lock() {
-            Ok(h) => h,
-            Err(_) => return 0,
-        };
-        if hist.is_empty() {
-            return 0;
-        }
-        let tall_rows = visible_rows.saturating_mul(10).max(500);
-        let mut parser = vt100::Parser::new(tall_rows, cols, 0);
-        parser.process(&hist);
-        let (cursor_row, _) = parser.screen().cursor_position();
-        cursor_row.saturating_sub(visible_rows) as usize
-    }
 
     /// Kill the child process and reap it to prevent zombies.
     pub fn kill(&mut self) {
