@@ -29,11 +29,46 @@ const BOTTOM_PANEL_HEIGHT: u16 = 5;
 
 /// Known commands for tab autocomplete.
 const COMMANDS: &[&str] = &[
-    "spawn", "kill", "broadcast", "quit", "help", "history", "scroll", "layout",
+    "spawn", "kill", "broadcast", "quit", "help", "history", "scroll", "layout", "alias", "sessions",
 ];
 
 /// Known CLI names for tab autocomplete.
 const CLI_NAMES: &[&str] = &["claude", "codex", "gemini", "opencode"];
+
+/// Known CLI flags for tab autocomplete after CLI name.
+const CLI_FLAGS: &[&str] = &[
+    "--dangerously-skip-permissions",
+    "--verbose",
+    "--model",
+    "--resume",
+    "--continue",
+    "--print",
+];
+
+/// Load aliases from ~/.mtt/aliases.json
+fn load_aliases() -> HashMap<String, String> {
+    let path = match dirs::home_dir() {
+        Some(h) => h.join(".mtt/aliases.json"),
+        None => return HashMap::new(),
+    };
+    let data = match std::fs::read_to_string(&path) {
+        Ok(d) => d,
+        Err(_) => return HashMap::new(),
+    };
+    serde_json::from_str(&data).unwrap_or_default()
+}
+
+/// Save aliases to ~/.mtt/aliases.json
+fn save_aliases(aliases: &HashMap<String, String>) {
+    if let Some(home) = dirs::home_dir() {
+        let dir = home.join(".mtt");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("aliases.json");
+        if let Ok(json) = serde_json::to_string_pretty(aliases) {
+            let _ = std::fs::write(&path, json);
+        }
+    }
+}
 
 /// UI mode.
 enum Mode {
@@ -57,6 +92,7 @@ pub struct App {
     mode: Mode,
     command_input: String,
     command_history: Vec<String>,
+    aliases: HashMap<String, String>, // e.g. "cla" -> "claude --dangerously-skip-permissions"
     history_cursor: usize,
     tab_matches: Vec<String>,
     tab_index: usize,
@@ -88,6 +124,7 @@ impl App {
             mode: Mode::Normal,
             command_input: String::new(),
             command_history: Vec::new(),
+            aliases: load_aliases(),
             history_cursor: 0,
             tab_matches: Vec::new(),
             tab_index: 0,
@@ -1416,11 +1453,16 @@ impl App {
         let parts: Vec<&str> = input.split_whitespace().collect();
 
         if parts.len() <= 1 && !input.ends_with(' ') {
-            // Completing command name
+            // Completing command name + aliases
             let prefix = parts.first().copied().unwrap_or("");
             for cmd in COMMANDS {
                 if cmd.starts_with(prefix) && *cmd != prefix {
                     self.tab_matches.push(cmd.to_string());
+                }
+            }
+            for alias_name in self.aliases.keys() {
+                if alias_name.starts_with(prefix) && alias_name != prefix {
+                    self.tab_matches.push(alias_name.clone());
                 }
             }
         } else if parts.first() == Some(&"spawn") {
@@ -1434,11 +1476,29 @@ impl App {
                     }
                 }
             } else if parts.len() >= 2 {
+                // Check if last part starts with -- (completing a flag)
+                let last = parts.last().copied().unwrap_or("");
+                if last.starts_with("--") || (input.ends_with(' ') && parts.len() >= 2) {
+                    let prefix = if last.starts_with("--") { last } else { "--" };
+                    let base = if last.starts_with("--") {
+                        parts[..parts.len()-1].join(" ")
+                    } else {
+                        parts.join(" ")
+                    };
+                    for flag in CLI_FLAGS {
+                        if flag.starts_with(prefix) && *flag != prefix {
+                            self.tab_matches.push(format!("{base} {flag}"));
+                        }
+                    }
+                    if !self.tab_matches.is_empty() {
+                        return;
+                    }
+                }
                 // Completing directory path
                 let dir_part = if input.ends_with(' ') && parts.len() == 2 {
                     ""
                 } else if parts.len() > 2 {
-                    parts[2]
+                    parts[2..].iter().rev().find(|p| !p.starts_with("--")).copied().unwrap_or("")
                 } else {
                     return;
                 };
@@ -1628,8 +1688,47 @@ impl App {
                 self.show_help = true;
             }
 
+            "alias" => {
+                // :alias — list all aliases
+                // :alias cla claude --dangerously-skip-permissions — define alias
+                // :alias cla — remove alias
+                if parts.len() == 1 {
+                    if self.aliases.is_empty() {
+                        self.message = "no aliases. :alias <name> <expansion>".to_string();
+                    } else {
+                        let list: Vec<String> = self.aliases.iter()
+                            .map(|(k, v)| format!("{k}={v}"))
+                            .collect();
+                        self.message = list.join(" | ");
+                    }
+                } else if parts.len() == 2 {
+                    // Remove alias
+                    let name = parts[1];
+                    self.aliases.remove(name);
+                    save_aliases(&self.aliases);
+                    self.message = format!("removed alias '{name}'");
+                } else {
+                    // Define alias: :alias cla claude --dangerously-skip-permissions
+                    let name = parts[1].to_string();
+                    let expansion = parts[2..].join(" ");
+                    self.aliases.insert(name.clone(), expansion.clone());
+                    save_aliases(&self.aliases);
+                    self.message = format!("alias {name} = {expansion}");
+                }
+            }
+
             _ => {
-                self.message = format!("unknown command: {}", parts[0]);
+                // Check aliases before giving up
+                if let Some(expansion) = self.aliases.get(parts[0]).cloned() {
+                    let full = if parts.len() > 1 {
+                        format!("spawn {} {}", expansion, parts[1..].join(" "))
+                    } else {
+                        format!("spawn {}", expansion)
+                    };
+                    self.execute_command(&full);
+                } else {
+                    self.message = format!("unknown command: {}", parts[0]);
+                }
             }
         }
     }
