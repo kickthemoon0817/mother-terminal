@@ -29,7 +29,7 @@ const BOTTOM_PANEL_HEIGHT: u16 = 5;
 
 /// Known commands for tab autocomplete.
 const COMMANDS: &[&str] = &[
-    "spawn", "kill", "broadcast", "quit", "help", "history", "scroll", "layout", "alias", "sessions",
+    "spawn", "kill", "broadcast", "quit", "help", "history", "scroll", "layout", "alias", "sessions", "!",
 ];
 
 /// Known CLI names for tab autocomplete.
@@ -808,6 +808,7 @@ impl App {
             "  :layout                       toggle side/bottom",
             "  :scroll                       enter scroll mode",
             "  :help                         show this help",
+            "  :!<cmd>                      run shell command",
             "  :quit                         exit mtt",
             "",
             "  Keys",
@@ -1718,8 +1719,39 @@ impl App {
             }
 
             _ => {
-                // Check aliases before giving up
-                if let Some(expansion) = self.aliases.get(parts[0]).cloned() {
+                // !command — run shell command
+                if cmd.starts_with('!') {
+                    let shell_cmd = cmd.trim_start_matches('!').trim();
+                    if !shell_cmd.is_empty() {
+                        match std::process::Command::new("sh")
+                            .args(["-c", shell_cmd])
+                            .output()
+                        {
+                            Ok(output) => {
+                                let stdout = String::from_utf8_lossy(&output.stdout);
+                                let stderr = String::from_utf8_lossy(&output.stderr);
+                                let result = if !stdout.is_empty() {
+                                    stdout.trim().to_string()
+                                } else if !stderr.is_empty() {
+                                    stderr.trim().to_string()
+                                } else {
+                                    format!("(exit {})", output.status.code().unwrap_or(-1))
+                                };
+                                // Truncate long output for status bar
+                                self.message = if result.len() > 200 {
+                                    format!("{}…", &result[..200])
+                                } else {
+                                    result
+                                };
+                            }
+                            Err(e) => {
+                                self.message = format!("shell error: {e}");
+                            }
+                        }
+                    }
+                }
+                // Check aliases
+                else if let Some(expansion) = self.aliases.get(parts[0]).cloned() {
                     let full = if parts.len() > 1 {
                         format!("spawn {} {}", expansion, parts[1..].join(" "))
                     } else {
