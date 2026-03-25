@@ -33,7 +33,7 @@ const COMMANDS: &[&str] = &[
 ];
 
 /// Known CLI names for tab autocomplete.
-const CLI_NAMES: &[&str] = &["claude", "codex", "gemini", "opencode"];
+const CLI_NAMES: &[&str] = &["claude", "codex", "gemini", "opencode", "shell", "bash", "zsh"];
 
 /// Known CLI flags for tab autocomplete after CLI name.
 const CLI_FLAGS: &[&str] = &[
@@ -2069,5 +2069,6 @@ fn cli_color(cli: CLIType) -> Color {
         CLIType::Codex => Color::Rgb(52, 211, 153),
         CLIType::Gemini => Color::Rgb(251, 146, 60),
         CLIType::OpenCode => Color::Rgb(56, 189, 248),
+        CLIType::Shell => Color::Rgb(180, 180, 180), // gray for plain shell
     }
 }

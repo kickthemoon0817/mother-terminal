@@ -11,6 +11,7 @@ pub enum CLIType {
     Codex,
     Gemini,
     OpenCode,
+    Shell, // plain bash/zsh
 }
 
 impl CLIType {
@@ -20,6 +21,7 @@ impl CLIType {
             "codex" => Some(Self::Codex),
             "gemini" => Some(Self::Gemini),
             "opencode" => Some(Self::OpenCode),
+            "bash" | "zsh" | "sh" | "shell" => Some(Self::Shell),
             _ => None,
         }
     }
@@ -30,6 +32,7 @@ impl CLIType {
             Self::Codex => "codex",
             Self::Gemini => "gemini",
             Self::OpenCode => "opencode",
+            Self::Shell => "sh",
         }
     }
 }
@@ -87,7 +90,12 @@ impl Pane {
             pixel_height: 0,
         })?;
 
-        let mut cmd = CommandBuilder::new(cli.name());
+        let binary = if cli == CLIType::Shell {
+            std::env::var("SHELL").unwrap_or_else(|_| "bash".to_string())
+        } else {
+            cli.name().to_string()
+        };
+        let mut cmd = CommandBuilder::new(&binary);
         for arg in extra_args {
             cmd.arg(arg);
         }
