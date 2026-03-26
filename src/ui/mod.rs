@@ -1241,28 +1241,52 @@ impl App {
         }
     }
 
-    /// Forward a mouse event to the focused pane as SGR mouse escape sequence.
+    /// Forward a mouse event to the focused pane using its requested protocol.
     fn forward_mouse_to_pane(&mut self, mouse: &MouseEvent) {
         if let Some(pane) = self.panes.get_mut(self.focused) {
+            let screen = pane.screen();
+            let mode = screen.mouse_protocol_mode();
+            let encoding = screen.mouse_protocol_encoding();
+
+            // Log mouse mode for debugging
+            log::debug!("mouse forward: mode={:?} encoding={:?}", mode, encoding);
+
+            // If app hasn't enabled mouse tracking, don't forward
+            if matches!(mode, vt100::MouseProtocolMode::None) {
+                return;
+            }
+
             let col = mouse.column.saturating_sub(self.sidebar_width + 1) + 1;
             let row = mouse.row.saturating_sub(1) + 1;
 
-            let (btn, suffix) = match mouse.kind {
-                MouseEventKind::Down(MouseButton::Left) => (0, "M"),
-                MouseEventKind::Down(MouseButton::Right) => (2, "M"),
-                MouseEventKind::Down(MouseButton::Middle) => (1, "M"),
-                MouseEventKind::Up(MouseButton::Left) => (0, "m"),
-                MouseEventKind::Up(MouseButton::Right) => (2, "m"),
-                MouseEventKind::Up(MouseButton::Middle) => (1, "m"),
-                MouseEventKind::Drag(MouseButton::Left) => (32, "M"),
-                MouseEventKind::Drag(MouseButton::Right) => (34, "M"),
-                MouseEventKind::ScrollUp => (64, "M"),
-                MouseEventKind::ScrollDown => (65, "M"),
-                MouseEventKind::Moved => (35, "M"),
+            let (btn, is_release) = match mouse.kind {
+                MouseEventKind::Down(MouseButton::Left) => (0u8, false),
+                MouseEventKind::Down(MouseButton::Right) => (2, false),
+                MouseEventKind::Down(MouseButton::Middle) => (1, false),
+                MouseEventKind::Up(MouseButton::Left) => (0, true),
+                MouseEventKind::Up(MouseButton::Right) => (2, true),
+                MouseEventKind::Up(MouseButton::Middle) => (1, true),
+                MouseEventKind::Drag(MouseButton::Left) => (32, false),
+                MouseEventKind::Drag(MouseButton::Right) => (34, false),
+                MouseEventKind::ScrollUp => (64, false),
+                MouseEventKind::ScrollDown => (65, false),
+                MouseEventKind::Moved => (35, false),
                 _ => return,
             };
 
-            let seq = format!("\x1b[<{btn};{col};{row}{suffix}");
+            let seq = match encoding {
+                vt100::MouseProtocolEncoding::Sgr => {
+                    let suffix = if is_release { "m" } else { "M" };
+                    format!("\x1b[<{btn};{col};{row}{suffix}")
+                }
+                _ => {
+                    // Default/UTF-8 encoding: \x1b[M btn+32 col+32 row+32
+                    let cb = if is_release { 3 } else { btn } + 32;
+                    let cx = (col as u8).saturating_add(32).min(255);
+                    let cy = (row as u8).saturating_add(32).min(255);
+                    format!("\x1b[M{}{}{}", cb as char, cx as char, cy as char)
+                }
+            };
             let _ = pane.send_keys(seq.as_bytes());
         }
     }
