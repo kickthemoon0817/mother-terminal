@@ -1434,21 +1434,34 @@ impl App {
                 self.sidebar_dragging = false;
             }
             MouseEventKind::ScrollUp => {
-                if matches!(self.mode, Mode::Normal) {
-                    self.mode = Mode::Scroll;
-                }
-                if let Some(pane) = self.panes.get_mut(self.focused) {
-                    let max = pane.max_scroll();
-                    pane.scroll_offset = (pane.scroll_offset + 1).min(max);
+                if matches!(self.mode, Mode::Scroll) {
+                    // Already in mtt scroll mode — scroll the scrollback buffer
+                    if let Some(pane) = self.panes.get_mut(self.focused) {
+                        let max = pane.max_scroll();
+                        pane.scroll_offset = (pane.scroll_offset + 1).min(max);
+                    }
+                } else if let Some(pane) = self.panes.get_mut(self.focused) {
+                    // Normal mode — forward scroll to the pane as SGR mouse event
+                    let col = mouse.column.saturating_sub(self.sidebar_width + 1) + 1;
+                    let row = mouse.row.saturating_sub(1) + 1;
+                    let seq = format!("\x1b[<64;{col};{row}M");
+                    let _ = pane.send_keys(seq.as_bytes());
                 }
             }
             MouseEventKind::ScrollDown => {
-                if let Some(pane) = self.panes.get_mut(self.focused) {
-                    if pane.scroll_offset == 0 {
-                        self.mode = Mode::Normal;
-                    } else {
-                        pane.scroll_offset = pane.scroll_offset.saturating_sub(1);
+                if matches!(self.mode, Mode::Scroll) {
+                    if let Some(pane) = self.panes.get_mut(self.focused) {
+                        if pane.scroll_offset == 0 {
+                            self.mode = Mode::Normal;
+                        } else {
+                            pane.scroll_offset = pane.scroll_offset.saturating_sub(1);
+                        }
                     }
+                } else if let Some(pane) = self.panes.get_mut(self.focused) {
+                    let col = mouse.column.saturating_sub(self.sidebar_width + 1) + 1;
+                    let row = mouse.row.saturating_sub(1) + 1;
+                    let seq = format!("\x1b[<65;{col};{row}M");
+                    let _ = pane.send_keys(seq.as_bytes());
                 }
             }
             _ => {}
