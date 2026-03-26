@@ -29,7 +29,7 @@ const BOTTOM_PANEL_HEIGHT: u16 = 5;
 
 /// Known commands for tab autocomplete.
 const COMMANDS: &[&str] = &[
-    "spawn", "kill", "broadcast", "quit", "help", "history", "scroll", "layout", "alias", "sessions", "!",
+    "spawn", "kill", "broadcast", "quit", "help", "history", "layout", "alias", "sessions", "!",
 ];
 
 /// Known CLI names for tab autocomplete.
@@ -74,7 +74,6 @@ fn save_aliases(aliases: &HashMap<String, String>) {
 enum Mode {
     Normal,      // pane focused, keys go to AI CLI
     Command,     // typing a command in the command bar
-    Scroll,      // scrolling through pane scrollback
     SidebarNav,  // navigating the sidebar to switch sessions
 }
 
@@ -111,7 +110,6 @@ pub struct App {
     cached_usage: std::sync::Arc<std::sync::Mutex<HashMap<String, String>>>,
     last_usage_fetch: Instant,
     last_slow_tick: Instant, // rate-limit history/stall/usage-parse to every 2s
-    last_scroll: Instant,    // throttle scroll events
     home_cursor: usize,
     saved_sessions: Vec<persist::SessionInfo>,
     history: Option<HistoryRecorder>,
@@ -145,7 +143,6 @@ impl App {
             cached_usage: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
             last_usage_fetch: Instant::now() - Duration::from_secs(120), // trigger immediately
             last_slow_tick: Instant::now(),
-            last_scroll: Instant::now(),
             home_cursor: 0,
             saved_sessions: persist::load_sessions(),
             history: HistoryRecorder::new().ok(),
@@ -218,8 +215,6 @@ impl App {
                     } else if pane.status == Status::Stalled {
                         pane.status = Status::Active;
                     }
-                    // Capture screen snapshot for scrollback (works for all apps including TUIs)
-                    pane.capture_scrollback_snapshot();
                 }
             }
 
@@ -391,19 +386,6 @@ impl App {
             spans.push(Span::styled(
                 if hrs > 0 { format!("  {hrs}h{m:02}m") } else { format!("  {m}m") },
                 Style::default().fg(Color::DarkGray),
-            ));
-        }
-
-        // Scroll mode indicator
-        if matches!(self.mode, Mode::Scroll) {
-            let offset = self.panes.get(self.focused).map(|p| p.scroll_offset).unwrap_or(0);
-            spans.push(Span::raw("  │  "));
-            spans.push(Span::styled(
-                format!("SCROLL ↑{offset}"),
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
             ));
         }
 
@@ -815,7 +797,6 @@ impl App {
             "  :kill [n]                     kill session",
             "  :broadcast <msg>              send to all",
             "  :layout                       toggle side/bottom",
-            "  :scroll                       enter scroll mode",
             "  :help                         show this help",
             "  :!<cmd>                      run shell command",
             "  :quit                         exit mtt",
@@ -824,7 +805,6 @@ impl App {
             "  ─────────────────────────────────────",
             "  Ctrl-N / Ctrl-P               switch pane",
             "  Alt-1..9                      jump to pane",
-            "  Ctrl-B                        scroll mode",
             "  Ctrl-C                        interrupt / kill",
             "  : or /                        command / AI slash",
             "",
@@ -902,74 +882,8 @@ impl App {
         // Render the virtual terminal screen
         let screen = pane.screen();
         let (screen_rows, screen_cols) = screen.size();
-        let in_scroll = matches!(self.mode, Mode::Scroll) && is_focused && pane.scroll_offset > 0;
-
-        // In scroll mode, render scrollback lines above the live screen
-        if in_scroll {
-            let sb_len = pane.scrollback.len();
-            let offset = pane.scroll_offset;
-            let visible = inner.height as usize;
-
-            for display_row in 0..inner.height {
-                // Which scrollback line to show
-                // offset=1 means show 1 line of scrollback at top, rest is live screen
-                let sb_idx = if offset >= visible {
-                    // All scrollback
-                    sb_len.saturating_sub(offset) + display_row as usize
-                } else {
-                    // Mix: top rows are scrollback, bottom rows are live screen
-                    let sb_rows = offset.min(visible);
-                    if (display_row as usize) < sb_rows {
-                        sb_len.saturating_sub(offset) + display_row as usize
-                    } else {
-                        // Render live screen row
-                        let live_row = display_row as usize - sb_rows;
-                        let buf = frame.buffer_mut();
-                        let mut col: u16 = 0;
-                        while col < inner.width.min(screen_cols) {
-                            if let Some(cell) = screen.cell(live_row as u16, col) {
-                                let ch = cell.contents();
-                                let fg = convert_vt100_color(cell.fgcolor());
-                                let bg = convert_vt100_color(cell.bgcolor());
-                                if !ch.is_empty() || bg != Color::Reset {
-                                    let mut style = Style::default();
-                                    if fg != Color::Reset { style = style.fg(fg); }
-                                    if bg != Color::Reset { style = style.bg(bg); }
-                                    if cell.bold() { style = style.add_modifier(Modifier::BOLD); }
-                                    if let Some(buf_cell) = buf.cell_mut((inner.x + col, inner.y + display_row)) {
-                                        buf_cell.set_symbol(&ch);
-                                        buf_cell.set_style(style);
-                                    }
-                                }
-                                col += if ch.chars().any(is_wide_char) { 2 } else { 1 };
-                            } else { col += 1; }
-                        }
-                        continue;
-                    }
-                };
-
-                if sb_idx < sb_len {
-                    let line = &pane.scrollback[sb_idx];
-                    let buf = frame.buffer_mut();
-                    for (c, sc) in line.cells.iter().enumerate() {
-                        if c as u16 >= inner.width { break; }
-                        let mut style = Style::default();
-                        let fg = convert_vt100_color(sc.fg);
-                        let bg = convert_vt100_color(sc.bg);
-                        if fg != Color::Reset { style = style.fg(fg); }
-                        if bg != Color::Reset { style = style.bg(bg); }
-                        if sc.bold { style = style.add_modifier(Modifier::BOLD); }
-                        if let Some(buf_cell) = buf.cell_mut((inner.x + c as u16, inner.y + display_row)) {
-                            let mut tmp = [0u8; 4];
-                            buf_cell.set_symbol(sc.ch.encode_utf8(&mut tmp));
-                            buf_cell.set_style(style);
-                        }
-                    }
-                }
-            }
-        } else {
-            // Normal mode: render live screen directly
-            for display_row in 0..inner.height.min(screen_rows) {
+        // Render live screen
+        for display_row in 0..inner.height.min(screen_rows) {
                 let mut col: u16 = 0;
                 while col < inner.width.min(screen_cols) {
                     if let Some(cell) = screen.cell(display_row, col) {
@@ -1012,7 +926,6 @@ impl App {
                 }
             }
         }
-        } // end else (normal mode)
 
         // Hide the hardware cursor — let the AI CLI render its own cursor
         // via the vt100 screen content (it draws its own cursor character)
@@ -1106,7 +1019,6 @@ impl App {
         match &self.mode {
             Mode::Normal => self.handle_normal_key(key),
             Mode::Command => self.handle_command_key(key),
-            Mode::Scroll => self.handle_scroll_key(key),
             Mode::SidebarNav => self.handle_sidebar_nav_key(key),
         }
     }
@@ -1172,20 +1084,6 @@ impl App {
                 self.mode = Mode::Command;
                 self.command_input.clear();
                 self.tab_matches.clear();
-            }
-            // Ctrl-B enters scroll mode (Ctrl-S conflicts with flow control)
-            (KeyModifiers::CONTROL, KeyCode::Char('b')) => {
-                if let Some(pane) = self.panes.get(self.focused) {
-                    if pane.scrollback.is_empty() {
-                        self.message = "no scrollback (TUI apps manage their own scroll)".to_string();
-                    } else {
-                        self.mode = Mode::Scroll;
-                        if let Some(pane) = self.panes.get_mut(self.focused) {
-                            pane.scroll_offset = 0;
-                        }
-                        self.message = "scroll mode — ↑↓/PgUp/PgDn scroll, Esc exit".to_string();
-                    }
-                }
             }
             // Ctrl-N / Ctrl-P: switch panes
             (KeyModifiers::CONTROL, KeyCode::Char('n')) => {
@@ -1343,58 +1241,6 @@ impl App {
         }
     }
 
-    fn handle_scroll_key(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Esc | KeyCode::Char('q') => {
-                self.mode = Mode::Normal;
-                if let Some(pane) = self.panes.get_mut(self.focused) {
-                    pane.scroll_offset = 0;
-                }
-                self.message.clear();
-            }
-            KeyCode::Up | KeyCode::Char('k') => {
-                if let Some(pane) = self.panes.get_mut(self.focused) {
-                    let max = pane.max_scroll();
-                    pane.scroll_offset = (pane.scroll_offset + 1).min(max);
-                }
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                if let Some(pane) = self.panes.get_mut(self.focused) {
-                    if pane.scroll_offset == 0 {
-                        self.mode = Mode::Normal;
-                        self.message.clear();
-                    } else {
-                        pane.scroll_offset = pane.scroll_offset.saturating_sub(1);
-                    }
-                }
-            }
-            KeyCode::PageUp => {
-                if let Some(pane) = self.panes.get_mut(self.focused) {
-                    let max = pane.max_scroll();
-                    pane.scroll_offset = (pane.scroll_offset + 20).min(max);
-                }
-            }
-            KeyCode::PageDown => {
-                if let Some(pane) = self.panes.get_mut(self.focused) {
-                    if pane.scroll_offset <= 20 {
-                        pane.scroll_offset = 0;
-                        self.mode = Mode::Normal;
-                        self.message.clear();
-                    } else {
-                        pane.scroll_offset = pane.scroll_offset.saturating_sub(20);
-                    }
-                }
-            }
-            _ => {
-                self.mode = Mode::Normal;
-                if let Some(pane) = self.panes.get_mut(self.focused) {
-                    pane.scroll_offset = 0;
-                }
-                self.message.clear();
-            }
-        }
-    }
-
     fn handle_mouse(&mut self, mouse: MouseEvent) {
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
@@ -1444,31 +1290,11 @@ impl App {
                 self.sidebar_dragging = false;
             }
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
-                // Throttle: skip if last scroll was <50ms ago
-                if self.last_scroll.elapsed() < Duration::from_millis(50) {
-                    return;
-                }
-                self.last_scroll = Instant::now();
-
-                let is_up = matches!(mouse.kind, MouseEventKind::ScrollUp);
-
-                if matches!(self.mode, Mode::Scroll) {
-                    // mtt scroll mode — navigate scrollback
-                    if let Some(pane) = self.panes.get_mut(self.focused) {
-                        if is_up {
-                            let max = pane.max_scroll();
-                            pane.scroll_offset = (pane.scroll_offset + 1).min(max);
-                        } else if pane.scroll_offset == 0 {
-                            self.mode = Mode::Normal;
-                        } else {
-                            pane.scroll_offset = pane.scroll_offset.saturating_sub(1);
-                        }
-                    }
-                } else if let Some(pane) = self.panes.get_mut(self.focused) {
-                    // Normal mode — forward to pane as SGR mouse event
+                // Forward scroll to pane as SGR mouse event (native feel, no throttle)
+                if let Some(pane) = self.panes.get_mut(self.focused) {
                     let col = mouse.column.saturating_sub(self.sidebar_width + 1) + 1;
                     let row = mouse.row.saturating_sub(1) + 1;
-                    let btn = if is_up { 64 } else { 65 };
+                    let btn = if matches!(mouse.kind, MouseEventKind::ScrollUp) { 64 } else { 65 };
                     let seq = format!("\x1b[<{btn};{col};{row}M");
                     let _ = pane.send_keys(seq.as_bytes());
                 }
@@ -1659,13 +1485,6 @@ impl App {
                     }
                 }
                 self.message = format!("broadcast to {sent} sessions");
-            }
-
-            "scroll" => {
-                self.mode = Mode::Scroll;
-                if let Some(pane) = self.panes.get_mut(self.focused) {
-                    pane.scroll_offset = 0;
-                }
             }
 
             "quit" | "q" => {

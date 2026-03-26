@@ -45,20 +45,6 @@ pub enum Status {
     Dead,
 }
 
-/// A pre-rendered scrollback line with per-cell color info.
-#[derive(Clone)]
-pub struct ScrollLine {
-    pub cells: Vec<ScrollCell>,
-}
-
-#[derive(Clone, Copy)]
-pub struct ScrollCell {
-    pub ch: char,
-    pub fg: vt100::Color,
-    pub bg: vt100::Color,
-    pub bold: bool,
-}
-
 /// A pane holding an AI CLI session with its PTY and virtual screen.
 pub struct Pane {
     pub id: usize,
@@ -66,13 +52,10 @@ pub struct Pane {
     pub cwd: String,
     pub status: Status,
     pub started: Instant,
-    pub scroll_offset: usize,
-    pub scrollback: Vec<ScrollLine>, // pre-rendered lines for instant scroll
 
     writer: Box<dyn Write + Send>,
     buffer: Arc<Mutex<Vec<u8>>>,
     parser: vt100::Parser,
-    last_snapshot: String, // for dedup — only store if screen changed
     master: Box<dyn MasterPty + Send>,
     child: Box<dyn portable_pty::Child + Send>,
 }
@@ -132,12 +115,9 @@ impl Pane {
             cwd: cwd.to_string(),
             status: Status::Active,
             started: Instant::now(),
-            scroll_offset: 0,
-            scrollback: Vec::new(),
             writer,
             buffer,
             parser: vt100::Parser::new(rows, cols, 1000),
-            last_snapshot: String::new(),
             master: pair.master,
             child,
         })
@@ -209,64 +189,6 @@ impl Pane {
             }
         }
     }
-
-    /// Capture current screen as scrollback snapshot (called from slow tick).
-    /// Only stores if screen content changed since last snapshot.
-    pub fn capture_scrollback_snapshot(&mut self) {
-        let screen = self.parser.screen();
-        let (rows, cols) = screen.size();
-
-        // Build a quick hash string to check if screen changed
-        let mut check = String::with_capacity(256);
-        for row in 0..rows.min(5) {
-            for col in 0..cols.min(40) {
-                if let Some(cell) = screen.cell(row, col) {
-                    let ch = cell.contents();
-                    if !ch.is_empty() {
-                        check.push_str(&ch);
-                    }
-                }
-            }
-        }
-
-        if check == self.last_snapshot {
-            return; // Screen unchanged, skip
-        }
-        self.last_snapshot = check;
-
-        // Capture all rows as scrollback lines with color info
-        for row in 0..rows {
-            let mut cells = Vec::with_capacity(cols as usize);
-            let mut has_content = false;
-            for col in 0..cols {
-                if let Some(cell) = screen.cell(row, col) {
-                    let ch = cell.contents();
-                    let c = ch.chars().next().unwrap_or(' ');
-                    if c != ' ' { has_content = true; }
-                    cells.push(ScrollCell {
-                        ch: c,
-                        fg: cell.fgcolor(),
-                        bg: cell.bgcolor(),
-                        bold: cell.bold(),
-                    });
-                }
-            }
-            if has_content {
-                self.scrollback.push(ScrollLine { cells });
-            }
-        }
-
-        // Cap scrollback at 5000 lines
-        if self.scrollback.len() > 5000 {
-            self.scrollback.drain(..1000);
-        }
-    }
-
-    /// Get the maximum scroll offset (number of scrollback lines).
-    pub fn max_scroll(&self) -> usize {
-        self.scrollback.len()
-    }
-
 
     /// Kill the child process and reap it to prevent zombies.
     pub fn kill(&mut self) {
