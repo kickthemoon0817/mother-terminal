@@ -873,14 +873,23 @@ impl App {
             short_path(&pane.cwd)
         );
 
+        let title_style = if is_focused {
+            Style::default()
+                .fg(Color::Black)
+                .bg(border_color)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+                .fg(border_color)
+                .add_modifier(Modifier::BOLD)
+        };
+
         let block = Block::default()
             .borders(Borders::TOP)
             .border_style(Style::default().fg(border_color))
             .title(Span::styled(
                 format!("{status_indicator} {title}"),
-                Style::default()
-                    .fg(border_color)
-                    .add_modifier(Modifier::BOLD),
+                title_style,
             ));
 
         let inner = block.inner(area);
