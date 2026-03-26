@@ -1248,10 +1248,10 @@ impl App {
             let mode = screen.mouse_protocol_mode();
             let encoding = screen.mouse_protocol_encoding();
 
-            // Log mouse mode for debugging
-            log::debug!("mouse forward: mode={:?} encoding={:?}", mode, encoding);
-
-            // If app hasn't enabled mouse tracking, don't forward
+            // If app hasn't enabled mouse tracking, ignore mouse events.
+            // TUI apps like Claude Code use alternate screen — scroll is
+            // handled by the terminal's scrollback, not by the app.
+            // Use :history or Claude's /resume to review past content.
             if matches!(mode, vt100::MouseProtocolMode::None) {
                 return;
             }
