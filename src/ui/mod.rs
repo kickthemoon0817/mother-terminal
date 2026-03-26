@@ -218,6 +218,8 @@ impl App {
                     } else if pane.status == Status::Stalled {
                         pane.status = Status::Active;
                     }
+                    // Capture screen snapshot for scrollback (works for all apps including TUIs)
+                    pane.capture_scrollback_snapshot();
                 }
             }
 

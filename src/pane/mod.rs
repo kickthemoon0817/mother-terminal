@@ -72,7 +72,7 @@ pub struct Pane {
     writer: Box<dyn Write + Send>,
     buffer: Arc<Mutex<Vec<u8>>>,
     parser: vt100::Parser,
-    last_top_line: String,
+    last_snapshot: String, // for dedup — only store if screen changed
     master: Box<dyn MasterPty + Send>,
     child: Box<dyn portable_pty::Child + Send>,
 }
@@ -137,7 +137,7 @@ impl Pane {
             writer,
             buffer,
             parser: vt100::Parser::new(rows, cols, 1000),
-            last_top_line: String::new(),
+            last_snapshot: String::new(),
             master: pair.master,
             child,
         })
@@ -159,45 +159,7 @@ impl Pane {
             data
         };
 
-        // Capture top line before processing (to detect scroll)
-        let screen = self.parser.screen();
-        let cols = screen.size().1;
-        let mut old_top = String::new();
-        for col in 0..cols {
-            if let Some(cell) = screen.cell(0, col) {
-                old_top.push_str(&cell.contents());
-            }
-        }
-
         self.parser.process(&data);
-
-        // If top line changed, the old one scrolled off — save it to scrollback
-        let screen = self.parser.screen();
-        let mut new_top = String::new();
-        for col in 0..cols {
-            if let Some(cell) = screen.cell(0, col) {
-                new_top.push_str(&cell.contents());
-            }
-        }
-
-        if !self.last_top_line.is_empty() && old_top != new_top && old_top != self.last_top_line {
-            // Capture the old top line with colors
-            // (we already lost the cells, so use last_top_line as plain text)
-            let cells: Vec<ScrollCell> = self.last_top_line.chars().map(|c| ScrollCell {
-                ch: c,
-                fg: vt100::Color::Default,
-                bg: vt100::Color::Default,
-                bold: false,
-            }).collect();
-            self.scrollback.push(ScrollLine { cells });
-
-            // Cap scrollback at 5000 lines
-            if self.scrollback.len() > 5000 {
-                self.scrollback.drain(..1000);
-            }
-        }
-        self.last_top_line = new_top;
-
         true
     }
 
@@ -245,6 +207,58 @@ impl Pane {
                 self.status = Status::Dead;
                 false
             }
+        }
+    }
+
+    /// Capture current screen as scrollback snapshot (called from slow tick).
+    /// Only stores if screen content changed since last snapshot.
+    pub fn capture_scrollback_snapshot(&mut self) {
+        let screen = self.parser.screen();
+        let (rows, cols) = screen.size();
+
+        // Build a quick hash string to check if screen changed
+        let mut check = String::with_capacity(256);
+        for row in 0..rows.min(5) {
+            for col in 0..cols.min(40) {
+                if let Some(cell) = screen.cell(row, col) {
+                    let ch = cell.contents();
+                    if !ch.is_empty() {
+                        check.push_str(&ch);
+                    }
+                }
+            }
+        }
+
+        if check == self.last_snapshot {
+            return; // Screen unchanged, skip
+        }
+        self.last_snapshot = check;
+
+        // Capture all rows as scrollback lines with color info
+        for row in 0..rows {
+            let mut cells = Vec::with_capacity(cols as usize);
+            let mut has_content = false;
+            for col in 0..cols {
+                if let Some(cell) = screen.cell(row, col) {
+                    let ch = cell.contents();
+                    let c = ch.chars().next().unwrap_or(' ');
+                    if c != ' ' { has_content = true; }
+                    cells.push(ScrollCell {
+                        ch: c,
+                        fg: cell.fgcolor(),
+                        bg: cell.bgcolor(),
+                        bold: cell.bold(),
+                    });
+                }
+            }
+            if has_content {
+                self.scrollback.push(ScrollLine { cells });
+            }
+        }
+
+        // Cap scrollback at 5000 lines
+        if self.scrollback.len() > 5000 {
+            self.scrollback.drain(..1000);
         }
     }
 
