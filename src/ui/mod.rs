@@ -1241,6 +1241,32 @@ impl App {
         }
     }
 
+    /// Forward a mouse event to the focused pane as SGR mouse escape sequence.
+    fn forward_mouse_to_pane(&mut self, mouse: &MouseEvent) {
+        if let Some(pane) = self.panes.get_mut(self.focused) {
+            let col = mouse.column.saturating_sub(self.sidebar_width + 1) + 1;
+            let row = mouse.row.saturating_sub(1) + 1;
+
+            let (btn, suffix) = match mouse.kind {
+                MouseEventKind::Down(MouseButton::Left) => (0, "M"),
+                MouseEventKind::Down(MouseButton::Right) => (2, "M"),
+                MouseEventKind::Down(MouseButton::Middle) => (1, "M"),
+                MouseEventKind::Up(MouseButton::Left) => (0, "m"),
+                MouseEventKind::Up(MouseButton::Right) => (2, "m"),
+                MouseEventKind::Up(MouseButton::Middle) => (1, "m"),
+                MouseEventKind::Drag(MouseButton::Left) => (32, "M"),
+                MouseEventKind::Drag(MouseButton::Right) => (34, "M"),
+                MouseEventKind::ScrollUp => (64, "M"),
+                MouseEventKind::ScrollDown => (65, "M"),
+                MouseEventKind::Moved => (35, "M"),
+                _ => return,
+            };
+
+            let seq = format!("\x1b[<{btn};{col};{row}{suffix}");
+            let _ = pane.send_keys(seq.as_bytes());
+        }
+    }
+
     fn handle_mouse(&mut self, mouse: MouseEvent) {
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
@@ -1268,6 +1294,12 @@ impl App {
                     return;
                 }
 
+                // Click in pane area — forward to pane
+                if mouse.column >= self.sidebar_width {
+                    self.forward_mouse_to_pane(&mouse);
+                    return;
+                }
+
                 // Click in bottom panel session row — switch pane
                 if self.show_bottom_panel {
                     let panel_start = rows.saturating_sub(2 + BOTTOM_PANEL_HEIGHT);
@@ -1284,22 +1316,21 @@ impl App {
                 if self.sidebar_dragging {
                     let new_width = mouse.column.clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH);
                     self.sidebar_width = new_width;
+                } else {
+                    self.forward_mouse_to_pane(&mouse);
                 }
             }
             MouseEventKind::Up(MouseButton::Left) => {
-                self.sidebar_dragging = false;
-            }
-            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
-                // Forward scroll to pane as SGR mouse event (native feel, no throttle)
-                if let Some(pane) = self.panes.get_mut(self.focused) {
-                    let col = mouse.column.saturating_sub(self.sidebar_width + 1) + 1;
-                    let row = mouse.row.saturating_sub(1) + 1;
-                    let btn = if matches!(mouse.kind, MouseEventKind::ScrollUp) { 64 } else { 65 };
-                    let seq = format!("\x1b[<{btn};{col};{row}M");
-                    let _ = pane.send_keys(seq.as_bytes());
+                if self.sidebar_dragging {
+                    self.sidebar_dragging = false;
+                } else {
+                    self.forward_mouse_to_pane(&mouse);
                 }
             }
-            _ => {}
+            _ => {
+                // Forward all other mouse events (scroll, move, etc.) to the pane
+                self.forward_mouse_to_pane(&mouse);
+            }
         }
     }
 
