@@ -822,7 +822,7 @@ impl App {
             "  ─────────────────────────────────────",
             "  Ctrl-N / Ctrl-P               switch pane",
             "  Alt-1..9                      jump to pane",
-            "  Ctrl-S                        scroll mode",
+            "  Ctrl-B                        scroll mode",
             "  Ctrl-C                        interrupt / kill",
             "  : or /                        command / AI slash",
             "",
@@ -1171,13 +1171,19 @@ impl App {
                 self.command_input.clear();
                 self.tab_matches.clear();
             }
-            // Ctrl-S enters scroll mode
-            (KeyModifiers::CONTROL, KeyCode::Char('s')) => {
-                self.mode = Mode::Scroll;
-                if let Some(pane) = self.panes.get_mut(self.focused) {
-                    pane.scroll_offset = 0;
+            // Ctrl-B enters scroll mode (Ctrl-S conflicts with flow control)
+            (KeyModifiers::CONTROL, KeyCode::Char('b')) => {
+                if let Some(pane) = self.panes.get(self.focused) {
+                    if pane.scrollback.is_empty() {
+                        self.message = "no scrollback (TUI apps manage their own scroll)".to_string();
+                    } else {
+                        self.mode = Mode::Scroll;
+                        if let Some(pane) = self.panes.get_mut(self.focused) {
+                            pane.scroll_offset = 0;
+                        }
+                        self.message = "scroll mode — ↑↓/PgUp/PgDn scroll, Esc exit".to_string();
+                    }
                 }
-                self.message = "scroll mode — ↑↓ scroll, Esc exit".to_string();
             }
             // Ctrl-N / Ctrl-P: switch panes
             (KeyModifiers::CONTROL, KeyCode::Char('n')) => {
