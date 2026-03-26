@@ -111,6 +111,7 @@ pub struct App {
     cached_usage: std::sync::Arc<std::sync::Mutex<HashMap<String, String>>>,
     last_usage_fetch: Instant,
     last_slow_tick: Instant, // rate-limit history/stall/usage-parse to every 2s
+    last_scroll: Instant,    // throttle scroll events
     home_cursor: usize,
     saved_sessions: Vec<persist::SessionInfo>,
     history: Option<HistoryRecorder>,
@@ -144,6 +145,7 @@ impl App {
             cached_usage: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
             last_usage_fetch: Instant::now() - Duration::from_secs(120), // trigger immediately
             last_slow_tick: Instant::now(),
+            last_scroll: Instant::now(),
             home_cursor: 0,
             saved_sessions: persist::load_sessions(),
             history: HistoryRecorder::new().ok(),
@@ -1433,34 +1435,33 @@ impl App {
             MouseEventKind::Up(MouseButton::Left) => {
                 self.sidebar_dragging = false;
             }
-            MouseEventKind::ScrollUp => {
-                if matches!(self.mode, Mode::Scroll) {
-                    // Already in mtt scroll mode — scroll the scrollback buffer
-                    if let Some(pane) = self.panes.get_mut(self.focused) {
-                        let max = pane.max_scroll();
-                        pane.scroll_offset = (pane.scroll_offset + 1).min(max);
-                    }
-                } else if let Some(pane) = self.panes.get_mut(self.focused) {
-                    // Normal mode — forward scroll to the pane as SGR mouse event
-                    let col = mouse.column.saturating_sub(self.sidebar_width + 1) + 1;
-                    let row = mouse.row.saturating_sub(1) + 1;
-                    let seq = format!("\x1b[<64;{col};{row}M");
-                    let _ = pane.send_keys(seq.as_bytes());
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                // Throttle: skip if last scroll was <50ms ago
+                if self.last_scroll.elapsed() < Duration::from_millis(50) {
+                    return;
                 }
-            }
-            MouseEventKind::ScrollDown => {
+                self.last_scroll = Instant::now();
+
+                let is_up = matches!(mouse.kind, MouseEventKind::ScrollUp);
+
                 if matches!(self.mode, Mode::Scroll) {
+                    // mtt scroll mode — navigate scrollback
                     if let Some(pane) = self.panes.get_mut(self.focused) {
-                        if pane.scroll_offset == 0 {
+                        if is_up {
+                            let max = pane.max_scroll();
+                            pane.scroll_offset = (pane.scroll_offset + 1).min(max);
+                        } else if pane.scroll_offset == 0 {
                             self.mode = Mode::Normal;
                         } else {
                             pane.scroll_offset = pane.scroll_offset.saturating_sub(1);
                         }
                     }
                 } else if let Some(pane) = self.panes.get_mut(self.focused) {
+                    // Normal mode — forward to pane as SGR mouse event
                     let col = mouse.column.saturating_sub(self.sidebar_width + 1) + 1;
                     let row = mouse.row.saturating_sub(1) + 1;
-                    let seq = format!("\x1b[<65;{col};{row}M");
+                    let btn = if is_up { 64 } else { 65 };
+                    let seq = format!("\x1b[<{btn};{col};{row}M");
                     let _ = pane.send_keys(seq.as_bytes());
                 }
             }
