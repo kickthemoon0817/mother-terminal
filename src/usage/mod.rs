@@ -274,14 +274,14 @@ pub fn format_cli_usage(cli: &str) -> String {
 
 fn curl_get(url: &str, token: &str) -> Option<serde_json::Value> {
     let output = std::process::Command::new("curl")
-        .args(["-s", "-H", &format!("Authorization: Bearer {token}"), url])
+        .args(["-s", "-m", "10", "-H", &format!("Authorization: Bearer {token}"), url])
         .output().ok()?;
     if !output.status.success() { return None; }
     serde_json::from_str(&String::from_utf8_lossy(&output.stdout)).ok()
 }
 
 fn curl_post_json(url: &str, body: &str, token: Option<&str>) -> Option<serde_json::Value> {
-    let mut args = vec!["-s", "-X", "POST", "-H", "Content-Type: application/json", "-d", body];
+    let mut args = vec!["-s", "-m", "10", "-X", "POST", "-H", "Content-Type: application/json", "-d", body];
     let auth_header;
     if let Some(t) = token {
         auth_header = format!("Authorization: Bearer {t}");

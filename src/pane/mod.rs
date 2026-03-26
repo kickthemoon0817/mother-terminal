@@ -51,9 +51,9 @@ pub struct ScrollLine {
     pub cells: Vec<ScrollCell>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 pub struct ScrollCell {
-    pub ch: String,
+    pub ch: char,
     pub fg: vt100::Color,
     pub bg: vt100::Color,
     pub bold: bool,
@@ -71,9 +71,8 @@ pub struct Pane {
 
     writer: Box<dyn Write + Send>,
     buffer: Arc<Mutex<Vec<u8>>>,
-    _raw_history: Arc<Mutex<Vec<u8>>>,
     parser: vt100::Parser,
-    last_top_line: String, // detect when top line scrolls off
+    last_top_line: String,
     master: Box<dyn MasterPty + Send>,
     child: Box<dyn portable_pty::Child + Send>,
 }
@@ -107,11 +106,9 @@ impl Pane {
         let mut reader = pair.master.try_clone_reader()?;
         let writer = pair.master.take_writer()?;
 
-        // Shared buffers for async PTY output
+        // Shared buffer for async PTY output
         let buffer: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::with_capacity(8192)));
-        let raw_history: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::with_capacity(65536)));
         let buf_clone = Arc::clone(&buffer);
-        let hist_clone = Arc::clone(&raw_history);
 
         // Background thread reads PTY output continuously
         std::thread::spawn(move || {
@@ -122,14 +119,6 @@ impl Pane {
                     Ok(n) => {
                         if let Ok(mut buf) = buf_clone.lock() {
                             buf.extend_from_slice(&tmp[..n]);
-                        }
-                        if let Ok(mut hist) = hist_clone.lock() {
-                            hist.extend_from_slice(&tmp[..n]);
-                            // Cap at 1MB to prevent unbounded growth
-                            if hist.len() > 1_048_576 {
-                                let drain = hist.len() - 524_288;
-                                hist.drain(..drain);
-                            }
                         }
                     }
                     Err(_) => break,
@@ -147,7 +136,6 @@ impl Pane {
             scrollback: Vec::new(),
             writer,
             buffer,
-            _raw_history: raw_history,
             parser: vt100::Parser::new(rows, cols, 1000),
             last_top_line: String::new(),
             master: pair.master,
@@ -166,8 +154,8 @@ impl Pane {
             if buf.is_empty() {
                 return false;
             }
-            let data = buf.clone();
-            buf.clear();
+            let mut data = Vec::with_capacity(buf.len());
+            std::mem::swap(&mut *buf, &mut data);
             data
         };
 
@@ -196,7 +184,7 @@ impl Pane {
             // Capture the old top line with colors
             // (we already lost the cells, so use last_top_line as plain text)
             let cells: Vec<ScrollCell> = self.last_top_line.chars().map(|c| ScrollCell {
-                ch: c.to_string(),
+                ch: c,
                 fg: vt100::Color::Default,
                 bg: vt100::Color::Default,
                 bold: false,

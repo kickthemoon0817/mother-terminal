@@ -110,6 +110,7 @@ pub struct App {
     picker_cursor: usize,
     cached_usage: std::sync::Arc<std::sync::Mutex<HashMap<String, String>>>,
     last_usage_fetch: Instant,
+    last_slow_tick: Instant, // rate-limit history/stall/usage-parse to every 2s
     home_cursor: usize,
     saved_sessions: Vec<persist::SessionInfo>,
     history: Option<HistoryRecorder>,
@@ -142,6 +143,7 @@ impl App {
             picker_cursor: 0,
             cached_usage: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
             last_usage_fetch: Instant::now() - Duration::from_secs(120), // trigger immediately
+            last_slow_tick: Instant::now(),
             home_cursor: 0,
             saved_sessions: persist::load_sessions(),
             history: HistoryRecorder::new().ok(),
@@ -186,31 +188,34 @@ impl App {
                 });
             }
 
-            // Poll PTY output, record history, check stalls
+            // Poll PTY output (fast — just drain buffer, O(1) swap)
             for pane in &mut self.panes {
-                if pane.poll_output() {
-                    // Record history
+                pane.poll_output();
+                if !pane.is_alive() && pane.status != Status::Dead {
+                    pane.status = Status::Dead;
+                }
+            }
+
+            // Slow tick: history, stall detection, usage parsing (every 2s, not 60fps)
+            if self.last_slow_tick.elapsed() > Duration::from_secs(2) {
+                self.last_slow_tick = Instant::now();
+                for pane in &mut self.panes {
+                    if pane.status == Status::Dead { continue; }
                     let text = pane.screen_text();
                     if let Some(ref recorder) = self.history {
                         let name = format!("{}_{}", pane.cli.name(), pane.id);
                         let _ = recorder.record(&name, &text);
                     }
-                    // Parse usage from screen output
-                    if let Some(screen_usage) = crate::usage::parse_usage_from_screen(pane.cli.name(), &text)
+                    if let Some(usage) = crate::usage::parse_usage_from_screen(pane.cli.name(), &text)
                         && let Ok(mut c) = self.cached_usage.lock() {
-                            c.insert(pane.cli.name().to_string(), screen_usage.format());
+                            c.insert(pane.cli.name().to_string(), usage.format());
                         }
-                    // Check for stalls
                     let stall = self.stall.check(&format!("{}", pane.id), &text);
                     if let crate::monitor::StallStatus::Stalled { .. } = stall {
                         pane.status = Status::Stalled;
                     } else if pane.status == Status::Stalled {
                         pane.status = Status::Active;
                     }
-                }
-                // Check if process died
-                if !pane.is_alive() && pane.status != Status::Dead {
-                    pane.status = Status::Dead;
                 }
             }
 
@@ -942,7 +947,8 @@ impl App {
                         if bg != Color::Reset { style = style.bg(bg); }
                         if sc.bold { style = style.add_modifier(Modifier::BOLD); }
                         if let Some(buf_cell) = buf.cell_mut((inner.x + c as u16, inner.y + display_row)) {
-                            buf_cell.set_symbol(&sc.ch);
+                            let mut tmp = [0u8; 4];
+                            buf_cell.set_symbol(sc.ch.encode_utf8(&mut tmp));
                             buf_cell.set_style(style);
                         }
                     }
