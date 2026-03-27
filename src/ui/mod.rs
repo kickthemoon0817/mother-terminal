@@ -851,8 +851,13 @@ impl App {
             Status::Dead => "✕",
         };
 
+        let scroll_info = if pane.scroll_offset > 0 {
+            format!(" [scroll -{}]", pane.scroll_offset)
+        } else {
+            String::new()
+        };
         let title = format!(
-            " {} [{}] ",
+            " {} [{}]{scroll_info} ",
             pane.cli.name(),
             short_path(&pane.cwd)
         );
@@ -1248,11 +1253,17 @@ impl App {
             let mode = screen.mouse_protocol_mode();
             let encoding = screen.mouse_protocol_encoding();
 
-            // If app hasn't enabled mouse tracking, ignore mouse events.
-            // TUI apps like Claude Code use alternate screen — scroll is
-            // handled by the terminal's scrollback, not by the app.
-            // Use :history or Claude's /resume to review past content.
+            // If app hasn't enabled mouse tracking, use MTT's own scrollback.
             if matches!(mode, vt100::MouseProtocolMode::None) {
+                match mouse.kind {
+                    MouseEventKind::ScrollUp => {
+                        pane.set_scrollback(pane.scroll_offset.saturating_add(1));
+                    }
+                    MouseEventKind::ScrollDown => {
+                        pane.set_scrollback(pane.scroll_offset.saturating_sub(1));
+                    }
+                    _ => {}
+                }
                 return;
             }
 

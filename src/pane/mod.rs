@@ -53,6 +53,8 @@ pub struct Pane {
     pub status: Status,
     pub started: Instant,
 
+    pub scroll_offset: usize,
+
     writer: Box<dyn Write + Send>,
     buffer: Arc<Mutex<Vec<u8>>>,
     parser: vt100::Parser,
@@ -115,6 +117,7 @@ impl Pane {
             cwd: cwd.to_string(),
             status: Status::Active,
             started: Instant::now(),
+            scroll_offset: 0,
             writer,
             buffer,
             parser: vt100::Parser::new(rows, cols, 1000),
@@ -140,7 +143,18 @@ impl Pane {
         };
 
         self.parser.process(&data);
+        // Snap back to live view when new output arrives
+        if self.scroll_offset > 0 {
+            self.scroll_offset = 0;
+            self.parser.set_scrollback(0);
+        }
         true
+    }
+
+    /// Set the scrollback view offset (0 = live screen).
+    pub fn set_scrollback(&mut self, offset: usize) {
+        self.scroll_offset = offset;
+        self.parser.set_scrollback(offset);
     }
 
     /// Send keystrokes to the PTY.
