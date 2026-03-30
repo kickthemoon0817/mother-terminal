@@ -84,6 +84,14 @@ enum PanelPosition {
     Bottom,
 }
 
+/// Text selection state for terminal-level copy.
+/// Rows are in content-space: content_row = display_row - scroll_offset.
+/// Negative values mean scrollback lines.
+struct TextSelection {
+    start: (u16, i32), // (col, content_row)
+    end: (u16, i32),
+}
+
 /// The main application state.
 pub struct App {
     pub panes: Vec<Pane>,
@@ -114,6 +122,7 @@ pub struct App {
     saved_sessions: Vec<persist::SessionInfo>,
     history: Option<HistoryRecorder>,
     stall: StallDetector,
+    selection: Option<TextSelection>,
 }
 
 impl App {
@@ -147,6 +156,7 @@ impl App {
             saved_sessions: persist::load_sessions(),
             history: HistoryRecorder::new().ok(),
             stall: StallDetector::new(),
+            selection: None,
         }
     }
 
@@ -896,7 +906,8 @@ impl App {
                     let fg = convert_vt100_color(cell.fgcolor());
                     let bg = convert_vt100_color(cell.bgcolor());
 
-                    if ch.is_empty() && bg == Color::Reset {
+                    let selected = self.is_selected(col, display_row, pane.scroll_offset);
+                    if ch.is_empty() && bg == Color::Reset && !selected {
                         col += 1;
                         continue;
                     }
@@ -917,9 +928,14 @@ impl App {
                         style = style.add_modifier(Modifier::REVERSED);
                     }
 
+                    if selected {
+                        style = style.add_modifier(Modifier::REVERSED);
+                    }
+
+                    let symbol = if ch.is_empty() { " " } else { &ch };
                     let buf = frame.buffer_mut();
                     if let Some(buf_cell) = buf.cell_mut((inner.x + col, inner.y + display_row)) {
-                        buf_cell.set_symbol(&ch);
+                        buf_cell.set_symbol(symbol);
                         buf_cell.set_style(style);
                     }
 
@@ -1134,6 +1150,9 @@ impl App {
                 if let Some(pane) = self.panes.get_mut(self.focused) {
                     let bytes = key_to_bytes(key);
                     if !bytes.is_empty() {
+                        if pane.scroll_offset > 0 {
+                            pane.set_scrollback(0);
+                        }
                         let _ = pane.send_keys(&bytes);
                     }
                 }
@@ -1253,14 +1272,59 @@ impl App {
             let mode = screen.mouse_protocol_mode();
             let encoding = screen.mouse_protocol_encoding();
 
-            // If app hasn't enabled mouse tracking, use MTT's own scrollback.
+            // If app hasn't enabled mouse tracking, handle scrollback
+            // and text selection at the terminal level.
             if matches!(mode, vt100::MouseProtocolMode::None) {
+                let sc = mouse.column.saturating_sub(self.sidebar_width);
+                let display_row = mouse.row.saturating_sub(2);
+                let content_row = display_row as i32 - pane.scroll_offset as i32;
+                // Pane inner height for edge detection
+                let (_, term_rows) = self.terminal_size;
+                let pane_top_abs: u16 = 2; // status bar + block border
+                let pane_bot_abs = term_rows.saturating_sub(1); // above usage bar
+
                 match mouse.kind {
                     MouseEventKind::ScrollUp => {
                         pane.set_scrollback(pane.scroll_offset.saturating_add(1));
                     }
                     MouseEventKind::ScrollDown => {
                         pane.set_scrollback(pane.scroll_offset.saturating_sub(1));
+                    }
+                    MouseEventKind::Down(MouseButton::Left) => {
+                        self.selection = Some(TextSelection {
+                            start: (sc, content_row),
+                            end: (sc, content_row),
+                        });
+                    }
+                    MouseEventKind::Drag(MouseButton::Left) => {
+                        if let Some(ref mut sel) = self.selection {
+                            if mouse.row < pane_top_abs {
+                                // Auto-scroll up into scrollback
+                                pane.set_scrollback(pane.scroll_offset.saturating_add(1));
+                                let cr = -(pane.scroll_offset as i32);
+                                sel.end = (sc, cr);
+                            } else if mouse.row >= pane_bot_abs {
+                                // Auto-scroll down toward live
+                                pane.set_scrollback(pane.scroll_offset.saturating_sub(1));
+                                let vis_height = pane_bot_abs.saturating_sub(pane_top_abs);
+                                let cr = vis_height as i32 - 1 - pane.scroll_offset as i32;
+                                sel.end = (sc, cr);
+                            } else {
+                                sel.end = (sc, content_row);
+                            }
+                        }
+                    }
+                    MouseEventKind::Up(MouseButton::Left) => {
+                        if let Some(ref sel) = self.selection {
+                            if sel.start != sel.end {
+                                let text = extract_selection_text_with_scroll(sel, pane);
+                                if !text.is_empty() {
+                                    let _ = copy_to_clipboard(&text);
+                                }
+                            } else {
+                                self.selection = None;
+                            }
+                        }
                     }
                     _ => {}
                 }
@@ -1367,6 +1431,27 @@ impl App {
                 self.forward_mouse_to_pane(&mouse);
             }
         }
+    }
+
+    // ── Text selection ─────────────────────────────────────────────────
+
+    /// Check if a cell at (col, display_row) is within the current selection.
+    /// Converts display_row to content-space using the pane's scroll_offset.
+    fn is_selected(&self, col: u16, display_row: u16, scroll_offset: usize) -> bool {
+        let Some(ref sel) = self.selection else { return false };
+        let cr = display_row as i32 - scroll_offset as i32;
+        let (mut sc, mut sr) = sel.start;
+        let (mut ec, mut er) = sel.end;
+        if sr > er || (sr == er && sc > ec) {
+            std::mem::swap(&mut sc, &mut ec);
+            std::mem::swap(&mut sr, &mut er);
+        }
+        if sel.start == sel.end { return false; }
+        if cr < sr || cr > er { return false; }
+        if cr == sr && cr == er { return col >= sc && col <= ec; }
+        if cr == sr { return col >= sc; }
+        if cr == er { return col <= ec; }
+        true
     }
 
     // ── Tab completion ───────────────────────────────────────────────────
@@ -1800,6 +1885,53 @@ impl App {
         self.show_session_picker = false;
         self.show_help = false;
     }
+}
+
+// ── Text selection helpers ───────────────────────────────────────────────
+
+/// Extract selected text, temporarily adjusting scrollback to reach all rows.
+fn extract_selection_text_with_scroll(sel: &TextSelection, pane: &mut Pane) -> String {
+    let (mut sc, mut sr) = sel.start;
+    let (mut ec, mut er) = sel.end;
+    if sr > er || (sr == er && sc > ec) {
+        std::mem::swap(&mut sc, &mut ec);
+        std::mem::swap(&mut sr, &mut er);
+    }
+    let saved = pane.scroll_offset;
+    // Set scrollback so the oldest selected row is visible at display row 0
+    let needed_offset = if sr < 0 { (-sr) as usize } else { 0 };
+    pane.set_scrollback(needed_offset);
+
+    let screen = pane.screen();
+    let (_, screen_cols) = screen.size();
+    let mut result = String::new();
+    for cr in sr..=er {
+        let display_row = (cr + needed_offset as i32) as u16;
+        let col_start = if cr == sr { sc } else { 0 };
+        let col_end = if cr == er { ec } else { screen_cols.saturating_sub(1) };
+        for col in col_start..=col_end {
+            if let Some(cell) = screen.cell(display_row, col) {
+                let ch = cell.contents();
+                if ch.is_empty() { result.push(' '); } else { result.push_str(&ch); }
+            }
+        }
+        if cr < er { result.push('\n'); }
+    }
+    pane.set_scrollback(saved);
+    result.lines().map(|l| l.trim_end()).collect::<Vec<_>>().join("\n")
+}
+
+fn copy_to_clipboard(text: &str) -> anyhow::Result<()> {
+    use std::process::{Command, Stdio};
+    let mut child = Command::new("pbcopy")
+        .stdin(Stdio::piped())
+        .spawn()?;
+    if let Some(mut stdin) = child.stdin.take() {
+        use std::io::Write;
+        stdin.write_all(text.as_bytes())?;
+    }
+    child.wait()?;
+    Ok(())
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────

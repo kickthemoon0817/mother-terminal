@@ -143,11 +143,6 @@ impl Pane {
         };
 
         self.parser.process(&data);
-        // Snap back to live view when new output arrives
-        if self.scroll_offset > 0 {
-            self.scroll_offset = 0;
-            self.parser.set_scrollback(0);
-        }
         true
     }
 
@@ -186,6 +181,11 @@ impl Pane {
             pixel_height: 0,
         })?;
         self.parser.set_size(rows, cols);
+        // Reflow changes scrollback line count, so snap to live
+        if self.scroll_offset > 0 {
+            self.scroll_offset = 0;
+            self.parser.set_scrollback(0);
+        }
         Ok(())
     }
 
