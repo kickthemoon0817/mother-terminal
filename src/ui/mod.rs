@@ -1034,6 +1034,7 @@ impl App {
                 }
                 KeyCode::Enter => {
                     self.focused = self.picker_cursor;
+                    self.selection = None;
                     self.show_session_picker = false;
                 }
                 _ => {
@@ -1076,6 +1077,7 @@ impl App {
                             self.panes.remove(self.focused);
                             if self.focused >= self.panes.len() && !self.panes.is_empty() {
                                 self.focused = self.panes.len() - 1;
+                                self.selection = None;
                             }
                             self.message = "session killed and removed".to_string();
                             self.last_ctrl_c = None;
@@ -1116,11 +1118,13 @@ impl App {
             (KeyModifiers::CONTROL, KeyCode::Char('n')) => {
                 if !self.panes.is_empty() {
                     self.focused = (self.focused + 1) % self.panes.len();
+                    self.selection = None;
                 }
             }
             (KeyModifiers::CONTROL, KeyCode::Char('p')) => {
                 if !self.panes.is_empty() {
                     self.focused = (self.focused + self.panes.len() - 1) % self.panes.len();
+                    self.selection = None;
                 }
             }
             // Alt-1..9: switch to pane by number
@@ -1128,6 +1132,7 @@ impl App {
                 let idx = c.to_digit(10).unwrap_or(0) as usize;
                 if idx > 0 && idx <= self.panes.len() {
                     self.focused = idx - 1;
+                    self.selection = None;
                 }
             }
             // Home screen navigation when no panes
@@ -1327,10 +1332,9 @@ impl App {
                                 if !text.is_empty() {
                                     let _ = copy_to_clipboard(&text);
                                 }
-                            } else {
-                                self.selection = None;
                             }
                         }
+                        self.selection = None;
                     }
                     _ => {}
                 }
@@ -1395,6 +1399,7 @@ impl App {
                     let idx = sidebar_row as usize;
                     if idx < self.panes.len() {
                         self.focused = idx;
+                        self.selection = None;
                     }
                     return;
                 }
@@ -1413,6 +1418,7 @@ impl App {
                         let idx = panel_row as usize;
                         if idx < self.panes.len() {
                             self.focused = idx;
+                            self.selection = None;
                         }
                     }
                 }
@@ -1445,19 +1451,7 @@ impl App {
     /// Converts display_row to content-space using the pane's scroll_offset.
     fn is_selected(&self, col: u16, display_row: u16, scroll_offset: usize) -> bool {
         let Some(ref sel) = self.selection else { return false };
-        let cr = display_row as i32 - scroll_offset as i32;
-        let (mut sc, mut sr) = sel.start;
-        let (mut ec, mut er) = sel.end;
-        if sr > er || (sr == er && sc > ec) {
-            std::mem::swap(&mut sc, &mut ec);
-            std::mem::swap(&mut sr, &mut er);
-        }
-        if sel.start == sel.end { return false; }
-        if cr < sr || cr > er { return false; }
-        if cr == sr && cr == er { return col >= sc && col <= ec; }
-        if cr == sr { return col >= sc; }
-        if cr == er { return col <= ec; }
-        true
+        is_selected_pure(sel, col, display_row, scroll_offset)
     }
 
     // ── Tab completion ───────────────────────────────────────────────────
@@ -1601,6 +1595,7 @@ impl App {
                             format!("spawned {} in {}", cli.name(), short_path(&cwd));
                         self.panes.push(pane);
                         self.focused = self.panes.len() - 1;
+                        self.selection = None;
                     }
                     Err(e) => {
                         self.message = format!("spawn failed: {e}");
@@ -1625,6 +1620,7 @@ impl App {
                     if self.focused >= self.panes.len() && !self.panes.is_empty() {
                         self.focused = self.panes.len() - 1;
                     }
+                    self.selection = None;
                     self.message = format!("killed session {}", idx + 1);
                 }
             }
@@ -1895,6 +1891,25 @@ impl App {
 
 // ── Text selection helpers ───────────────────────────────────────────────
 
+/// Pure hit-test: is the cell at (col, display_row) inside the selection?
+/// `scroll_offset` converts display_row to content-space (content_row = display_row - scroll_offset).
+/// Returns false when start == end (zero-length selection).
+fn is_selected_pure(sel: &TextSelection, col: u16, display_row: u16, scroll_offset: usize) -> bool {
+    let cr = display_row as i32 - scroll_offset as i32;
+    let (mut sc, mut sr) = sel.start;
+    let (mut ec, mut er) = sel.end;
+    if sr > er || (sr == er && sc > ec) {
+        std::mem::swap(&mut sc, &mut ec);
+        std::mem::swap(&mut sr, &mut er);
+    }
+    if sel.start == sel.end { return false; }
+    if cr < sr || cr > er { return false; }
+    if cr == sr && cr == er { return col >= sc && col <= ec; }
+    if cr == sr { return col >= sc; }
+    if cr == er { return col <= ec; }
+    true
+}
+
 /// Extract selected text, temporarily adjusting scrollback to reach all rows.
 fn extract_selection_text_with_scroll(sel: &TextSelection, pane: &mut Pane) -> String {
     let (mut sc, mut sr) = sel.start;
@@ -1912,7 +1927,9 @@ fn extract_selection_text_with_scroll(sel: &TextSelection, pane: &mut Pane) -> S
     let (_, screen_cols) = screen.size();
     let mut result = String::new();
     for cr in sr..=er {
-        let display_row = (cr + needed_offset as i32) as u16;
+        let Some(display_row) = u16::try_from(cr + needed_offset as i32).ok() else {
+            continue;
+        };
         let col_start = if cr == sr { sc } else { 0 };
         let col_end = if cr == er { ec } else { screen_cols.saturating_sub(1) };
         for col in col_start..=col_end {
@@ -1929,12 +1946,23 @@ fn extract_selection_text_with_scroll(sel: &TextSelection, pane: &mut Pane) -> S
 
 fn copy_to_clipboard(text: &str) -> anyhow::Result<()> {
     use std::process::{Command, Stdio};
-    let mut child = Command::new("pbcopy")
+    // Strip C0/C1 control chars except tab and newline to prevent
+    // clipboard injection (OSC sequences, \r injection, etc.)
+    let safe: String = text
+        .chars()
+        .filter(|&c| c == '\t' || c == '\n' || !c.is_control())
+        .collect();
+    let cmd = if cfg!(target_os = "macos") {
+        "pbcopy"
+    } else {
+        "xclip"
+    };
+    let mut child = Command::new(cmd)
         .stdin(Stdio::piped())
         .spawn()?;
     if let Some(mut stdin) = child.stdin.take() {
         use std::io::Write;
-        stdin.write_all(text.as_bytes())?;
+        stdin.write_all(safe.as_bytes())?;
     }
     child.wait()?;
     Ok(())
@@ -2130,5 +2158,150 @@ fn cli_color(cli: CLIType) -> Color {
         CLIType::Gemini => Color::Rgb(251, 146, 60),
         CLIType::OpenCode => Color::Rgb(56, 189, 248),
         CLIType::Shell => Color::Rgb(180, 180, 180), // gray for plain shell
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TextSelection, is_selected_pure, is_wide_char};
+
+    // ── is_wide_char ────────────────────────────────────────────────────────
+
+    #[test]
+    fn wide_char_returns_true_for_hangul_syllable() {
+        assert!(is_wide_char('한')); // U+D55C, inside AC00..D7AF
+    }
+
+    #[test]
+    fn wide_char_returns_true_for_cjk_unified() {
+        assert!(is_wide_char('中')); // U+4E2D, inside 4E00..9FFF
+    }
+
+    #[test]
+    fn wide_char_returns_true_for_fullwidth_latin() {
+        assert!(is_wide_char('Ａ')); // U+FF21, inside FF00..FF60
+    }
+
+    #[test]
+    fn wide_char_returns_false_for_ascii() {
+        assert!(!is_wide_char('A'));
+        assert!(!is_wide_char(' '));
+        assert!(!is_wide_char('!'));
+    }
+
+    #[test]
+    fn wide_char_returns_false_for_latin_extended() {
+        assert!(!is_wide_char('é')); // U+00E9 — not a wide char range
+    }
+
+    // ── is_selected_pure ────────────────────────────────────────────────────
+    // Tests for selection hit-testing logic in content-space.
+    // is_selected_pure(sel, col, display_row, scroll_offset) -> bool
+
+    fn sel(start: (u16, i32), end: (u16, i32)) -> TextSelection {
+        TextSelection { start, end }
+    }
+
+    #[test]
+    fn returns_false_when_no_selection_exists() {
+        // Passing None simulates App::selection being None.
+        // We test the pure helper with a zero-length selection instead.
+        let s = sel((5, 2), (5, 2)); // start == end => no selection
+        assert!(!is_selected_pure(&s, 5, 2, 0));
+    }
+
+    #[test]
+    fn single_row_selects_columns_within_range() {
+        let s = sel((3, 1), (7, 1));
+        assert!(is_selected_pure(&s, 3, 1, 0));
+        assert!(is_selected_pure(&s, 5, 1, 0));
+        assert!(is_selected_pure(&s, 7, 1, 0));
+    }
+
+    #[test]
+    fn single_row_excludes_columns_outside_range() {
+        let s = sel((3, 1), (7, 1));
+        assert!(!is_selected_pure(&s, 2, 1, 0));
+        assert!(!is_selected_pure(&s, 8, 1, 0));
+    }
+
+    #[test]
+    fn multi_row_first_row_selected_from_start_col() {
+        // rows 2..=4, start col 5 on row 2
+        let s = sel((5, 2), (3, 4));
+        // row 2: only col >= 5
+        assert!(is_selected_pure(&s, 5, 2, 0));
+        assert!(is_selected_pure(&s, 79, 2, 0));
+        assert!(!is_selected_pure(&s, 4, 2, 0));
+    }
+
+    #[test]
+    fn multi_row_last_row_selected_up_to_end_col() {
+        let s = sel((5, 2), (3, 4));
+        // row 4: only col <= 3
+        assert!(is_selected_pure(&s, 0, 4, 0));
+        assert!(is_selected_pure(&s, 3, 4, 0));
+        assert!(!is_selected_pure(&s, 4, 4, 0));
+    }
+
+    #[test]
+    fn multi_row_middle_row_is_fully_selected() {
+        let s = sel((5, 2), (3, 4));
+        // row 3: entire row
+        assert!(is_selected_pure(&s, 0, 3, 0));
+        assert!(is_selected_pure(&s, 79, 3, 0));
+    }
+
+    #[test]
+    fn rows_outside_selection_are_not_selected() {
+        let s = sel((0, 2), (79, 4));
+        assert!(!is_selected_pure(&s, 0, 1, 0));
+        assert!(!is_selected_pure(&s, 0, 5, 0));
+    }
+
+    #[test]
+    fn reversed_drag_selection_is_normalised_correctly() {
+        // User dragged upward: start > end in row order
+        let s = sel((7, 4), (2, 1));
+        // After normalisation: sr=1, sc=2, er=4, ec=7
+        // Row 1: col >= 2
+        assert!(is_selected_pure(&s, 2, 1, 0));
+        assert!(!is_selected_pure(&s, 1, 1, 0));
+        // Row 4: col <= 7
+        assert!(is_selected_pure(&s, 7, 4, 0));
+        assert!(!is_selected_pure(&s, 8, 4, 0));
+    }
+
+    #[test]
+    fn scroll_offset_shifts_content_row_mapping() {
+        // display_row=3, scroll_offset=2 -> content_row = 3-2 = 1
+        let s = sel((0, 1), (79, 1));
+        assert!(is_selected_pure(&s, 40, 3, 2));
+        // display_row=4 -> content_row=2, outside selection row 1
+        assert!(!is_selected_pure(&s, 40, 4, 2));
+    }
+
+    #[test]
+    fn selection_spanning_scrollback_into_live_screen() {
+        // content_row -1 is a scrollback line
+        let s = sel((0, -1), (79, 0));
+        // display_row=0, scroll_offset=1 -> content_row = 0-1 = -1 (scrollback)
+        assert!(is_selected_pure(&s, 40, 0, 1));
+        // display_row=1, scroll_offset=1 -> content_row = 0 (live)
+        assert!(is_selected_pure(&s, 0, 1, 1));
+        // display_row=2, scroll_offset=1 -> content_row = 1, outside
+        assert!(!is_selected_pure(&s, 0, 2, 1));
+    }
+
+    #[test]
+    fn same_row_reversed_cols_normalises_to_left_to_right() {
+        // sc > ec on same row: swap
+        let s = sel((10, 3), (2, 3));
+        // After normalisation sc=2, ec=10
+        assert!(is_selected_pure(&s, 2, 3, 0));
+        assert!(is_selected_pure(&s, 6, 3, 0));
+        assert!(is_selected_pure(&s, 10, 3, 0));
+        assert!(!is_selected_pure(&s, 11, 3, 0));
+        assert!(!is_selected_pure(&s, 1, 3, 0));
     }
 }

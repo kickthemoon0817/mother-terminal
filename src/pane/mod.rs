@@ -153,8 +153,9 @@ impl Pane {
 
     /// Set the scrollback view offset (0 = live screen).
     pub fn set_scrollback(&mut self, offset: usize) {
-        self.scroll_offset = offset;
         self.parser.set_scrollback(offset);
+        // Read back the clamped value — vt100 clamps to actual scrollback size
+        self.scroll_offset = self.parser.screen().scrollback();
     }
 
     /// Send keystrokes to the PTY.
