@@ -11,7 +11,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders, Clear, Paragraph},
     Frame, Terminal,
 };
 use std::collections::HashMap;
@@ -84,6 +84,14 @@ enum PanelPosition {
     Bottom,
 }
 
+/// Text selection state for terminal-level copy.
+/// Rows are in content-space: content_row = display_row - scroll_offset.
+/// Negative values mean scrollback lines.
+struct TextSelection {
+    start: (u16, i32), // (col, content_row)
+    end: (u16, i32),
+}
+
 /// The main application state.
 pub struct App {
     pub panes: Vec<Pane>,
@@ -114,6 +122,7 @@ pub struct App {
     saved_sessions: Vec<persist::SessionInfo>,
     history: Option<HistoryRecorder>,
     stall: StallDetector,
+    selection: Option<TextSelection>,
 }
 
 impl App {
@@ -147,6 +156,7 @@ impl App {
             saved_sessions: persist::load_sessions(),
             history: HistoryRecorder::new().ok(),
             stall: StallDetector::new(),
+            selection: None,
         }
     }
 
@@ -851,8 +861,13 @@ impl App {
             Status::Dead => "✕",
         };
 
+        let scroll_info = if pane.scroll_offset > 0 {
+            format!(" [scroll -{}]", pane.scroll_offset)
+        } else {
+            String::new()
+        };
         let title = format!(
-            " {} [{}] ",
+            " {} [{}]{scroll_info} ",
             pane.cli.name(),
             short_path(&pane.cwd)
         );
@@ -891,7 +906,8 @@ impl App {
                     let fg = convert_vt100_color(cell.fgcolor());
                     let bg = convert_vt100_color(cell.bgcolor());
 
-                    if ch.is_empty() && bg == Color::Reset {
+                    let selected = self.is_selected(col, display_row, pane.scroll_offset);
+                    if ch.is_empty() && bg == Color::Reset && !selected {
                         col += 1;
                         continue;
                     }
@@ -912,9 +928,14 @@ impl App {
                         style = style.add_modifier(Modifier::REVERSED);
                     }
 
+                    if selected {
+                        style = style.add_modifier(Modifier::REVERSED);
+                    }
+
+                    let symbol = if ch.is_empty() { " " } else { &ch };
                     let buf = frame.buffer_mut();
                     if let Some(buf_cell) = buf.cell_mut((inner.x + col, inner.y + display_row)) {
-                        buf_cell.set_symbol(&ch);
+                        buf_cell.set_symbol(symbol);
                         buf_cell.set_style(style);
                     }
 
@@ -943,9 +964,15 @@ impl App {
             height: 3,
         };
 
+        // Clear pane content behind the floating bar
+        frame.render_widget(Clear, cmd_area);
+        let clear_bg = Block::default()
+            .style(Style::default().bg(Color::Rgb(20, 20, 30)));
+        frame.render_widget(clear_bg, cmd_area);
+
         let mut spans = vec![
             Span::styled(
-                " ❯ ",
+                " : ",
                 Style::default()
                     .fg(Color::Rgb(120, 80, 170))
                     .add_modifier(Modifier::BOLD),
@@ -971,8 +998,8 @@ impl App {
 
         let block = Block::default()
             .borders(Borders::TOP | Borders::BOTTOM)
-            .border_style(Style::default().fg(Color::DarkGray))
-            .style(Style::default().bg(Color::Rgb(20, 20, 25)));
+            .border_style(Style::default().fg(Color::Rgb(60, 50, 80)))
+            .style(Style::default().bg(Color::Rgb(20, 20, 30)));
 
         let para = Paragraph::new(Line::from(spans)).block(block);
         frame.render_widget(para, cmd_area);
@@ -1007,6 +1034,7 @@ impl App {
                 }
                 KeyCode::Enter => {
                     self.focused = self.picker_cursor;
+                    self.selection = None;
                     self.show_session_picker = false;
                 }
                 _ => {
@@ -1049,6 +1077,7 @@ impl App {
                             self.panes.remove(self.focused);
                             if self.focused >= self.panes.len() && !self.panes.is_empty() {
                                 self.focused = self.panes.len() - 1;
+                                self.selection = None;
                             }
                             self.message = "session killed and removed".to_string();
                             self.last_ctrl_c = None;
@@ -1089,11 +1118,13 @@ impl App {
             (KeyModifiers::CONTROL, KeyCode::Char('n')) => {
                 if !self.panes.is_empty() {
                     self.focused = (self.focused + 1) % self.panes.len();
+                    self.selection = None;
                 }
             }
             (KeyModifiers::CONTROL, KeyCode::Char('p')) => {
                 if !self.panes.is_empty() {
                     self.focused = (self.focused + self.panes.len() - 1) % self.panes.len();
+                    self.selection = None;
                 }
             }
             // Alt-1..9: switch to pane by number
@@ -1101,6 +1132,7 @@ impl App {
                 let idx = c.to_digit(10).unwrap_or(0) as usize;
                 if idx > 0 && idx <= self.panes.len() {
                     self.focused = idx - 1;
+                    self.selection = None;
                 }
             }
             // Home screen navigation when no panes
@@ -1129,6 +1161,9 @@ impl App {
                 if let Some(pane) = self.panes.get_mut(self.focused) {
                     let bytes = key_to_bytes(key);
                     if !bytes.is_empty() {
+                        if pane.scroll_offset > 0 {
+                            pane.set_scrollback(0);
+                        }
                         let _ = pane.send_keys(&bytes);
                     }
                 }
@@ -1248,11 +1283,61 @@ impl App {
             let mode = screen.mouse_protocol_mode();
             let encoding = screen.mouse_protocol_encoding();
 
-            // If app hasn't enabled mouse tracking, ignore mouse events.
-            // TUI apps like Claude Code use alternate screen — scroll is
-            // handled by the terminal's scrollback, not by the app.
-            // Use :history or Claude's /resume to review past content.
+            // If app hasn't enabled mouse tracking, handle scrollback
+            // and text selection at the terminal level.
             if matches!(mode, vt100::MouseProtocolMode::None) {
+                let sc = mouse.column.saturating_sub(self.sidebar_width);
+                let display_row = mouse.row.saturating_sub(2);
+                let content_row = display_row as i32 - pane.scroll_offset as i32;
+                // Pane inner height for edge detection
+                let (_, term_rows) = self.terminal_size;
+                let pane_top_abs: u16 = 2; // status bar + block border
+                let pane_bot_abs = term_rows.saturating_sub(1); // above usage bar
+
+                match mouse.kind {
+                    MouseEventKind::ScrollUp => {
+                        pane.set_scrollback(pane.scroll_offset.saturating_add(1));
+                    }
+                    MouseEventKind::ScrollDown => {
+                        pane.set_scrollback(pane.scroll_offset.saturating_sub(1));
+                    }
+                    MouseEventKind::Down(MouseButton::Left) => {
+                        self.selection = Some(TextSelection {
+                            start: (sc, content_row),
+                            end: (sc, content_row),
+                        });
+                    }
+                    MouseEventKind::Drag(MouseButton::Left) => {
+                        if let Some(ref mut sel) = self.selection {
+                            if mouse.row < pane_top_abs {
+                                // Auto-scroll up into scrollback
+                                pane.set_scrollback(pane.scroll_offset.saturating_add(1));
+                                let cr = -(pane.scroll_offset as i32);
+                                sel.end = (sc, cr);
+                            } else if mouse.row >= pane_bot_abs {
+                                // Auto-scroll down toward live
+                                pane.set_scrollback(pane.scroll_offset.saturating_sub(1));
+                                let vis_height = pane_bot_abs.saturating_sub(pane_top_abs);
+                                let cr = vis_height as i32 - 1 - pane.scroll_offset as i32;
+                                sel.end = (sc, cr);
+                            } else {
+                                sel.end = (sc, content_row);
+                            }
+                        }
+                    }
+                    MouseEventKind::Up(MouseButton::Left) => {
+                        if let Some(ref sel) = self.selection {
+                            if sel.start != sel.end {
+                                let text = extract_selection_text_with_scroll(sel, pane);
+                                if !text.is_empty() {
+                                    let _ = copy_to_clipboard(&text);
+                                }
+                            }
+                        }
+                        self.selection = None;
+                    }
+                    _ => {}
+                }
                 return;
             }
 
@@ -1314,6 +1399,7 @@ impl App {
                     let idx = sidebar_row as usize;
                     if idx < self.panes.len() {
                         self.focused = idx;
+                        self.selection = None;
                     }
                     return;
                 }
@@ -1332,6 +1418,7 @@ impl App {
                         let idx = panel_row as usize;
                         if idx < self.panes.len() {
                             self.focused = idx;
+                            self.selection = None;
                         }
                     }
                 }
@@ -1356,6 +1443,15 @@ impl App {
                 self.forward_mouse_to_pane(&mouse);
             }
         }
+    }
+
+    // ── Text selection ─────────────────────────────────────────────────
+
+    /// Check if a cell at (col, display_row) is within the current selection.
+    /// Converts display_row to content-space using the pane's scroll_offset.
+    fn is_selected(&self, col: u16, display_row: u16, scroll_offset: usize) -> bool {
+        let Some(ref sel) = self.selection else { return false };
+        is_selected_pure(sel, col, display_row, scroll_offset)
     }
 
     // ── Tab completion ───────────────────────────────────────────────────
@@ -1499,6 +1595,7 @@ impl App {
                             format!("spawned {} in {}", cli.name(), short_path(&cwd));
                         self.panes.push(pane);
                         self.focused = self.panes.len() - 1;
+                        self.selection = None;
                     }
                     Err(e) => {
                         self.message = format!("spawn failed: {e}");
@@ -1523,6 +1620,7 @@ impl App {
                     if self.focused >= self.panes.len() && !self.panes.is_empty() {
                         self.focused = self.panes.len() - 1;
                     }
+                    self.selection = None;
                     self.message = format!("killed session {}", idx + 1);
                 }
             }
@@ -1791,6 +1889,85 @@ impl App {
     }
 }
 
+// ── Text selection helpers ───────────────────────────────────────────────
+
+/// Pure hit-test: is the cell at (col, display_row) inside the selection?
+/// `scroll_offset` converts display_row to content-space (content_row = display_row - scroll_offset).
+/// Returns false when start == end (zero-length selection).
+fn is_selected_pure(sel: &TextSelection, col: u16, display_row: u16, scroll_offset: usize) -> bool {
+    let cr = display_row as i32 - scroll_offset as i32;
+    let (mut sc, mut sr) = sel.start;
+    let (mut ec, mut er) = sel.end;
+    if sr > er || (sr == er && sc > ec) {
+        std::mem::swap(&mut sc, &mut ec);
+        std::mem::swap(&mut sr, &mut er);
+    }
+    if sel.start == sel.end { return false; }
+    if cr < sr || cr > er { return false; }
+    if cr == sr && cr == er { return col >= sc && col <= ec; }
+    if cr == sr { return col >= sc; }
+    if cr == er { return col <= ec; }
+    true
+}
+
+/// Extract selected text, temporarily adjusting scrollback to reach all rows.
+fn extract_selection_text_with_scroll(sel: &TextSelection, pane: &mut Pane) -> String {
+    let (mut sc, mut sr) = sel.start;
+    let (mut ec, mut er) = sel.end;
+    if sr > er || (sr == er && sc > ec) {
+        std::mem::swap(&mut sc, &mut ec);
+        std::mem::swap(&mut sr, &mut er);
+    }
+    let saved = pane.scroll_offset;
+    // Set scrollback so the oldest selected row is visible at display row 0
+    let needed_offset = if sr < 0 { (-sr) as usize } else { 0 };
+    pane.set_scrollback(needed_offset);
+
+    let screen = pane.screen();
+    let (_, screen_cols) = screen.size();
+    let mut result = String::new();
+    for cr in sr..=er {
+        let Some(display_row) = u16::try_from(cr + needed_offset as i32).ok() else {
+            continue;
+        };
+        let col_start = if cr == sr { sc } else { 0 };
+        let col_end = if cr == er { ec } else { screen_cols.saturating_sub(1) };
+        for col in col_start..=col_end {
+            if let Some(cell) = screen.cell(display_row, col) {
+                let ch = cell.contents();
+                if ch.is_empty() { result.push(' '); } else { result.push_str(&ch); }
+            }
+        }
+        if cr < er { result.push('\n'); }
+    }
+    pane.set_scrollback(saved);
+    result.lines().map(|l| l.trim_end()).collect::<Vec<_>>().join("\n")
+}
+
+fn copy_to_clipboard(text: &str) -> anyhow::Result<()> {
+    use std::process::{Command, Stdio};
+    // Strip C0/C1 control chars except tab and newline to prevent
+    // clipboard injection (OSC sequences, \r injection, etc.)
+    let safe: String = text
+        .chars()
+        .filter(|&c| c == '\t' || c == '\n' || !c.is_control())
+        .collect();
+    let cmd = if cfg!(target_os = "macos") {
+        "pbcopy"
+    } else {
+        "xclip"
+    };
+    let mut child = Command::new(cmd)
+        .stdin(Stdio::piped())
+        .spawn()?;
+    if let Some(mut stdin) = child.stdin.take() {
+        use std::io::Write;
+        stdin.write_all(safe.as_bytes())?;
+    }
+    child.wait()?;
+    Ok(())
+}
+
 // ── Helpers ──────────────────────────────────────────────────────────────
 
 fn convert_vt100_color(color: vt100::Color) -> Color {
@@ -1981,5 +2158,150 @@ fn cli_color(cli: CLIType) -> Color {
         CLIType::Gemini => Color::Rgb(251, 146, 60),
         CLIType::OpenCode => Color::Rgb(56, 189, 248),
         CLIType::Shell => Color::Rgb(180, 180, 180), // gray for plain shell
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TextSelection, is_selected_pure, is_wide_char};
+
+    // ── is_wide_char ────────────────────────────────────────────────────────
+
+    #[test]
+    fn wide_char_returns_true_for_hangul_syllable() {
+        assert!(is_wide_char('한')); // U+D55C, inside AC00..D7AF
+    }
+
+    #[test]
+    fn wide_char_returns_true_for_cjk_unified() {
+        assert!(is_wide_char('中')); // U+4E2D, inside 4E00..9FFF
+    }
+
+    #[test]
+    fn wide_char_returns_true_for_fullwidth_latin() {
+        assert!(is_wide_char('Ａ')); // U+FF21, inside FF00..FF60
+    }
+
+    #[test]
+    fn wide_char_returns_false_for_ascii() {
+        assert!(!is_wide_char('A'));
+        assert!(!is_wide_char(' '));
+        assert!(!is_wide_char('!'));
+    }
+
+    #[test]
+    fn wide_char_returns_false_for_latin_extended() {
+        assert!(!is_wide_char('é')); // U+00E9 — not a wide char range
+    }
+
+    // ── is_selected_pure ────────────────────────────────────────────────────
+    // Tests for selection hit-testing logic in content-space.
+    // is_selected_pure(sel, col, display_row, scroll_offset) -> bool
+
+    fn sel(start: (u16, i32), end: (u16, i32)) -> TextSelection {
+        TextSelection { start, end }
+    }
+
+    #[test]
+    fn returns_false_when_no_selection_exists() {
+        // Passing None simulates App::selection being None.
+        // We test the pure helper with a zero-length selection instead.
+        let s = sel((5, 2), (5, 2)); // start == end => no selection
+        assert!(!is_selected_pure(&s, 5, 2, 0));
+    }
+
+    #[test]
+    fn single_row_selects_columns_within_range() {
+        let s = sel((3, 1), (7, 1));
+        assert!(is_selected_pure(&s, 3, 1, 0));
+        assert!(is_selected_pure(&s, 5, 1, 0));
+        assert!(is_selected_pure(&s, 7, 1, 0));
+    }
+
+    #[test]
+    fn single_row_excludes_columns_outside_range() {
+        let s = sel((3, 1), (7, 1));
+        assert!(!is_selected_pure(&s, 2, 1, 0));
+        assert!(!is_selected_pure(&s, 8, 1, 0));
+    }
+
+    #[test]
+    fn multi_row_first_row_selected_from_start_col() {
+        // rows 2..=4, start col 5 on row 2
+        let s = sel((5, 2), (3, 4));
+        // row 2: only col >= 5
+        assert!(is_selected_pure(&s, 5, 2, 0));
+        assert!(is_selected_pure(&s, 79, 2, 0));
+        assert!(!is_selected_pure(&s, 4, 2, 0));
+    }
+
+    #[test]
+    fn multi_row_last_row_selected_up_to_end_col() {
+        let s = sel((5, 2), (3, 4));
+        // row 4: only col <= 3
+        assert!(is_selected_pure(&s, 0, 4, 0));
+        assert!(is_selected_pure(&s, 3, 4, 0));
+        assert!(!is_selected_pure(&s, 4, 4, 0));
+    }
+
+    #[test]
+    fn multi_row_middle_row_is_fully_selected() {
+        let s = sel((5, 2), (3, 4));
+        // row 3: entire row
+        assert!(is_selected_pure(&s, 0, 3, 0));
+        assert!(is_selected_pure(&s, 79, 3, 0));
+    }
+
+    #[test]
+    fn rows_outside_selection_are_not_selected() {
+        let s = sel((0, 2), (79, 4));
+        assert!(!is_selected_pure(&s, 0, 1, 0));
+        assert!(!is_selected_pure(&s, 0, 5, 0));
+    }
+
+    #[test]
+    fn reversed_drag_selection_is_normalised_correctly() {
+        // User dragged upward: start > end in row order
+        let s = sel((7, 4), (2, 1));
+        // After normalisation: sr=1, sc=2, er=4, ec=7
+        // Row 1: col >= 2
+        assert!(is_selected_pure(&s, 2, 1, 0));
+        assert!(!is_selected_pure(&s, 1, 1, 0));
+        // Row 4: col <= 7
+        assert!(is_selected_pure(&s, 7, 4, 0));
+        assert!(!is_selected_pure(&s, 8, 4, 0));
+    }
+
+    #[test]
+    fn scroll_offset_shifts_content_row_mapping() {
+        // display_row=3, scroll_offset=2 -> content_row = 3-2 = 1
+        let s = sel((0, 1), (79, 1));
+        assert!(is_selected_pure(&s, 40, 3, 2));
+        // display_row=4 -> content_row=2, outside selection row 1
+        assert!(!is_selected_pure(&s, 40, 4, 2));
+    }
+
+    #[test]
+    fn selection_spanning_scrollback_into_live_screen() {
+        // content_row -1 is a scrollback line
+        let s = sel((0, -1), (79, 0));
+        // display_row=0, scroll_offset=1 -> content_row = 0-1 = -1 (scrollback)
+        assert!(is_selected_pure(&s, 40, 0, 1));
+        // display_row=1, scroll_offset=1 -> content_row = 0 (live)
+        assert!(is_selected_pure(&s, 0, 1, 1));
+        // display_row=2, scroll_offset=1 -> content_row = 1, outside
+        assert!(!is_selected_pure(&s, 0, 2, 1));
+    }
+
+    #[test]
+    fn same_row_reversed_cols_normalises_to_left_to_right() {
+        // sc > ec on same row: swap
+        let s = sel((10, 3), (2, 3));
+        // After normalisation sc=2, ec=10
+        assert!(is_selected_pure(&s, 2, 3, 0));
+        assert!(is_selected_pure(&s, 6, 3, 0));
+        assert!(is_selected_pure(&s, 10, 3, 0));
+        assert!(!is_selected_pure(&s, 11, 3, 0));
+        assert!(!is_selected_pure(&s, 1, 3, 0));
     }
 }

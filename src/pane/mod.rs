@@ -53,6 +53,8 @@ pub struct Pane {
     pub status: Status,
     pub started: Instant,
 
+    pub scroll_offset: usize,
+
     writer: Box<dyn Write + Send>,
     buffer: Arc<Mutex<Vec<u8>>>,
     parser: vt100::Parser,
@@ -115,6 +117,7 @@ impl Pane {
             cwd: cwd.to_string(),
             status: Status::Active,
             started: Instant::now(),
+            scroll_offset: 0,
             writer,
             buffer,
             parser: vt100::Parser::new(rows, cols, 1000),
@@ -140,7 +143,19 @@ impl Pane {
         };
 
         self.parser.process(&data);
+        // vt100 auto-adjusts the scrollback offset when lines scroll off
+        // the top. Sync our value so the view stays on the same content.
+        if self.scroll_offset > 0 {
+            self.scroll_offset = self.parser.screen().scrollback();
+        }
         true
+    }
+
+    /// Set the scrollback view offset (0 = live screen).
+    pub fn set_scrollback(&mut self, offset: usize) {
+        self.parser.set_scrollback(offset);
+        // Read back the clamped value — vt100 clamps to actual scrollback size
+        self.scroll_offset = self.parser.screen().scrollback();
     }
 
     /// Send keystrokes to the PTY.
@@ -172,6 +187,11 @@ impl Pane {
             pixel_height: 0,
         })?;
         self.parser.set_size(rows, cols);
+        // Reflow changes scrollback line count, so snap to live
+        if self.scroll_offset > 0 {
+            self.scroll_offset = 0;
+            self.parser.set_scrollback(0);
+        }
         Ok(())
     }
 
