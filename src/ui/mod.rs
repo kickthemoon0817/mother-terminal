@@ -11,7 +11,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders, Clear, Paragraph},
     Frame, Terminal,
 };
 use std::collections::HashMap;
@@ -964,9 +964,15 @@ impl App {
             height: 3,
         };
 
+        // Clear pane content behind the floating bar
+        frame.render_widget(Clear, cmd_area);
+        let clear_bg = Block::default()
+            .style(Style::default().bg(Color::Rgb(20, 20, 30)));
+        frame.render_widget(clear_bg, cmd_area);
+
         let mut spans = vec![
             Span::styled(
-                " ❯ ",
+                " : ",
                 Style::default()
                     .fg(Color::Rgb(120, 80, 170))
                     .add_modifier(Modifier::BOLD),
@@ -992,8 +998,8 @@ impl App {
 
         let block = Block::default()
             .borders(Borders::TOP | Borders::BOTTOM)
-            .border_style(Style::default().fg(Color::DarkGray))
-            .style(Style::default().bg(Color::Rgb(20, 20, 25)));
+            .border_style(Style::default().fg(Color::Rgb(60, 50, 80)))
+            .style(Style::default().bg(Color::Rgb(20, 20, 30)));
 
         let para = Paragraph::new(Line::from(spans)).block(block);
         frame.render_widget(para, cmd_area);

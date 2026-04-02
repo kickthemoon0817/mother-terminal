@@ -143,6 +143,11 @@ impl Pane {
         };
 
         self.parser.process(&data);
+        // vt100 auto-adjusts the scrollback offset when lines scroll off
+        // the top. Sync our value so the view stays on the same content.
+        if self.scroll_offset > 0 {
+            self.scroll_offset = self.parser.screen().scrollback();
+        }
         true
     }
 
