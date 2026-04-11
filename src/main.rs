@@ -40,14 +40,19 @@ fn main() -> anyhow::Result<()> {
 
     info!("mtt starting");
 
-    // Background version check (non-blocking)
-    std::thread::spawn(|| {
-        if let Some(latest) = update::check_for_update_cached() {
-            eprintln!("\x1b[33mmtt v{latest} available — run `mtt update`\x1b[0m");
-        }
+    // Background version check (non-blocking) — result passed to App via shared state
+    let update_notice: std::sync::Arc<std::sync::Mutex<Option<String>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(None));
+    let notice_clone = std::sync::Arc::clone(&update_notice);
+    std::thread::spawn(move || {
+        if let Some(latest) = update::check_for_update_cached()
+            && let Ok(mut n) = notice_clone.lock() {
+                *n = Some(format!("mtt v{latest} available — run `mtt update`"));
+            }
     });
 
     let mut app = App::new();
+    app.update_notice = update_notice;
     app.restore_sessions();
     app.run()
 }

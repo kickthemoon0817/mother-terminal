@@ -1,10 +1,15 @@
 use anyhow::{Context, Result, bail};
 use std::fs;
 use std::path::PathBuf;
+use std::time::Duration;
 
 const REPO: &str = "kickthemoon0817/mother-terminal";
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const CHECK_CACHE_SECS: u64 = 86400; // 24 hours
+const API_TIMEOUT: Duration = Duration::from_secs(10);
+const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
+const MAX_API_RESPONSE: u64 = 1024 * 1024; // 1 MB
+const MAX_BINARY_SIZE: u64 = 100 * 1024 * 1024; // 100 MB
 
 /// Cached version check result.
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -27,16 +32,35 @@ fn now_secs() -> u64 {
         .as_secs()
 }
 
+fn api_agent() -> ureq::Agent {
+    ureq::Agent::new_with_config(
+        ureq::config::Config::builder()
+            .timeout_global(Some(API_TIMEOUT))
+            .build()
+    )
+}
+
+fn download_agent() -> ureq::Agent {
+    ureq::Agent::new_with_config(
+        ureq::config::Config::builder()
+            .timeout_global(Some(DOWNLOAD_TIMEOUT))
+            .build()
+    )
+}
+
 /// Fetch the latest release tag from GitHub API.
 fn fetch_latest_version() -> Result<String> {
     let url = format!("https://api.github.com/repos/{REPO}/releases/latest");
-    let resp = ureq::get(&url)
+    let resp = api_agent()
+        .get(&url)
         .header("User-Agent", &format!("mtt/{CURRENT_VERSION}"))
         .call()
         .context("failed to query GitHub releases")?;
 
     let body_str = resp
         .into_body()
+        .with_config()
+        .limit(MAX_API_RESPONSE)
         .read_to_string()
         .context("failed to read GitHub API response")?;
     let body: serde_json::Value = serde_json::from_str(&body_str)
@@ -59,7 +83,7 @@ pub fn check_for_update_cached() -> Option<String> {
     // Try reading cache
     if let Ok(data) = fs::read_to_string(&path)
         && let Ok(cache) = serde_json::from_str::<VersionCache>(&data)
-        && now_secs() - cache.checked_at < CHECK_CACHE_SECS {
+        && now_secs().saturating_sub(cache.checked_at) < CHECK_CACHE_SECS {
             return if is_newer(&cache.latest) {
                 Some(cache.latest)
             } else {
@@ -113,17 +137,27 @@ pub fn self_update() -> Result<()> {
     let binary_name = get_binary_name()?;
     let base_url = format!("https://github.com/{REPO}/releases/download/v{latest}");
 
-    // Download binary to temp file
-    let tmp_dir = std::env::temp_dir().join("mtt-update");
+    // Use a unique temp directory to prevent symlink/TOCTOU attacks
+    let tmp_dir = std::env::temp_dir().join(format!("mtt-update-{}", uuid::Uuid::new_v4()));
     fs::create_dir_all(&tmp_dir)?;
+
+    let result = do_update(&tmp_dir, &base_url, &binary_name, &latest);
+
+    // Always clean up temp dir
+    let _ = fs::remove_dir_all(&tmp_dir);
+
+    result
+}
+
+fn do_update(tmp_dir: &std::path::Path, base_url: &str, binary_name: &str, latest: &str) -> Result<()> {
     let tmp_binary = tmp_dir.join("mtt-new");
     let tmp_checksums = tmp_dir.join("mtt-checksums.sha256");
 
-    download_file(&format!("{base_url}/{binary_name}"), &tmp_binary)?;
-    download_file(&format!("{base_url}/mtt-checksums.sha256"), &tmp_checksums)?;
+    download_file(&format!("{base_url}/{binary_name}"), &tmp_binary, MAX_BINARY_SIZE)?;
+    download_file(&format!("{base_url}/mtt-checksums.sha256"), &tmp_checksums, MAX_API_RESPONSE)?;
 
     // Verify checksum
-    verify_checksum(&tmp_binary, &tmp_checksums, &binary_name)?;
+    verify_checksum(&tmp_binary, &tmp_checksums, binary_name)?;
 
     // Replace current binary
     let current_exe = std::env::current_exe()
@@ -132,13 +166,10 @@ pub fn self_update() -> Result<()> {
     #[cfg(unix)]
     replace_binary(&tmp_binary, &current_exe)?;
 
-    // Cleanup
-    let _ = fs::remove_dir_all(&tmp_dir);
-
     // Update cache
     if let Ok(path) = cache_path() {
         let cache = VersionCache {
-            latest: latest.clone(),
+            latest: latest.to_string(),
             checked_at: now_secs(),
         };
         if let Ok(json) = serde_json::to_string(&cache) {
@@ -170,13 +201,18 @@ fn get_binary_name() -> Result<String> {
     Ok(format!("mtt-{os}-{arch}"))
 }
 
-fn download_file(url: &str, dest: &std::path::Path) -> Result<()> {
-    let resp = ureq::get(url)
+fn download_file(url: &str, dest: &std::path::Path, max_size: u64) -> Result<()> {
+    let resp = download_agent()
+        .get(url)
         .header("User-Agent", &format!("mtt/{CURRENT_VERSION}"))
         .call()
         .with_context(|| format!("failed to download {url}"))?;
 
-    let body_bytes = resp.into_body().read_to_vec()
+    let body_bytes = resp
+        .into_body()
+        .with_config()
+        .limit(max_size)
+        .read_to_vec()
         .with_context(|| format!("failed to read response from {url}"))?;
     fs::write(dest, &body_bytes)
         .with_context(|| format!("failed to write {}", dest.display()))?;
@@ -189,9 +225,10 @@ fn verify_checksum(binary: &std::path::Path, checksums: &std::path::Path, name: 
     let checksum_content = fs::read_to_string(checksums)
         .context("failed to read checksums file")?;
 
+    // Anchored match: line must end with the exact binary name
     let expected = checksum_content
         .lines()
-        .find(|line| line.contains(name))
+        .find(|line| line.ends_with(name))
         .and_then(|line| line.split_whitespace().next())
         .context("no matching checksum found for this platform")?;
 
@@ -211,27 +248,31 @@ fn verify_checksum(binary: &std::path::Path, checksums: &std::path::Path, name: 
 
 #[cfg(unix)]
 fn replace_binary(new: &std::path::Path, current: &std::path::Path) -> Result<()> {
-
     // Copy permissions from current binary
     let perms = fs::metadata(current)
         .context("failed to read current binary metadata")?
         .permissions();
 
-    // Atomic replace: rename new over current
-    // On Unix, we can't rename over a running binary directly on all systems,
-    // so we rename the old one away first, then move the new one in.
+    // Copy the new binary to a temp file in the SAME directory as current
+    // to ensure fs::rename works (same filesystem).
+    let staging = current.with_extension("new");
+    fs::copy(new, &staging)
+        .context("failed to stage new binary")?;
+    fs::set_permissions(&staging, perms.clone())
+        .context("failed to set permissions on staged binary")?;
+
+    // Rename dance: move current aside, move staged into place
     let backup = current.with_extension("old");
     fs::rename(current, &backup)
         .context("failed to move current binary aside")?;
 
-    if let Err(e) = fs::rename(new, current) {
+    if let Err(e) = fs::rename(&staging, current) {
         // Restore backup on failure
         let _ = fs::rename(&backup, current);
+        let _ = fs::remove_file(&staging);
         return Err(e).context("failed to install new binary");
     }
 
-    fs::set_permissions(current, perms)
-        .context("failed to set permissions on new binary")?;
     let _ = fs::remove_file(&backup);
 
     Ok(())

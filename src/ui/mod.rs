@@ -126,6 +126,9 @@ pub struct App {
     /// Pending text to send to a pane after a delay (for branch query).
     /// Stores (pane_id, query, created_at) — uses pane id, not index.
     pending_input: Option<(usize, String, Instant)>,
+    /// Background version check result, set from main.rs.
+    pub update_notice: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    update_shown: bool,
 }
 
 impl App {
@@ -161,6 +164,8 @@ impl App {
             stall: StallDetector::new(),
             selection: None,
             pending_input: None,
+            update_notice: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            update_shown: false,
         }
     }
 
@@ -215,6 +220,14 @@ impl App {
                 && let Some((pane_id, text, _)) = self.pending_input.take()
                 && let Some(pane) = self.panes.iter_mut().find(|p| p.id == pane_id) {
                     let _ = pane.send_text(&text);
+                }
+
+            // Show update notice from background thread (once)
+            if !self.update_shown
+                && let Ok(notice) = self.update_notice.lock()
+                && let Some(ref msg) = *notice {
+                    self.message = msg.clone();
+                    self.update_shown = true;
                 }
 
             // Slow tick: history, stall detection, usage parsing (every 2s, not 60fps)
@@ -1659,7 +1672,7 @@ impl App {
             }
 
             "update" => {
-                self.message = "updating mtt... exit and run `mtt update`".to_string();
+                self.message = "run `mtt update` from your shell to update".to_string();
             }
 
             "quit" | "q" => {

@@ -58,7 +58,7 @@ download_and_verify() {
 
     # Verify checksum
     info "verifying checksum..."
-    EXPECTED=$(grep "${BINARY_NAME}" "${TMPDIR}/mtt-checksums.sha256" | awk '{print $1}')
+    EXPECTED=$(grep "  ${BINARY_NAME}$" "${TMPDIR}/mtt-checksums.sha256" | awk '{print $1}')
     if [ -z "$EXPECTED" ]; then
         error "no checksum found for ${BINARY_NAME}"
     fi
