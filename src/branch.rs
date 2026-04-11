@@ -66,6 +66,10 @@ pub fn create_branch(cwd: &str, base_session_id: &str) -> Result<String> {
         bail!("session file not found: {}", base_path.display());
     }
 
+    if base_session_id.contains('/') || base_session_id.contains('\\') || base_session_id.contains("..") {
+        bail!("invalid session ID: {}", base_session_id);
+    }
+
     let new_id = Uuid::new_v4().to_string();
     let new_path = dir.join(format!("{new_id}.jsonl"));
 
@@ -99,7 +103,7 @@ pub fn create_branch(cwd: &str, base_session_id: &str) -> Result<String> {
         output_lines.push(serde_json::to_string(&record)?);
     }
 
-    fs::write(&new_path, output_lines.join("\n"))
+    fs::write(&new_path, output_lines.join("\n") + "\n")
         .with_context(|| format!("failed to write {}", new_path.display()))?;
 
     Ok(new_id)

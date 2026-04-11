@@ -124,6 +124,7 @@ pub struct App {
     stall: StallDetector,
     selection: Option<TextSelection>,
     /// Pending text to send to a pane after a delay (for branch query).
+    /// Stores (pane_id, query, created_at) — uses pane id, not index.
     pending_input: Option<(usize, String, Instant)>,
 }
 
@@ -209,12 +210,11 @@ impl App {
             }
 
             // Send pending branch query after delay
-            if let Some((idx, ref text, created)) = self.pending_input.clone()
-                && created.elapsed() > Duration::from_secs(3) {
-                    if let Some(pane) = self.panes.get_mut(idx) {
-                        let _ = pane.send_text(text);
-                    }
-                    self.pending_input = None;
+            if let Some((_, _, created)) = &self.pending_input
+                && created.elapsed() > Duration::from_secs(3)
+                && let Some((pane_id, text, _)) = self.pending_input.take()
+                && let Some(pane) = self.panes.iter_mut().find(|p| p.id == pane_id) {
+                    let _ = pane.send_text(&text);
                 }
 
             // Slow tick: history, stall detection, usage parsing (every 2s, not 60fps)
@@ -1724,8 +1724,8 @@ impl App {
                 }
 
                 // Focused pane must be a Claude session
-                let (cli, cwd) = match self.panes.get(self.focused) {
-                    Some(pane) if pane.cli == CLIType::Claude => (pane.cli, pane.cwd.clone()),
+                let cwd = match self.panes.get(self.focused) {
+                    Some(pane) if pane.cli == CLIType::Claude => pane.cwd.clone(),
                     Some(_) => {
                         self.message = "branch only works on Claude sessions".to_string();
                         return;
@@ -1767,17 +1767,17 @@ impl App {
 
                 let id = self.panes.len();
                 let resume_args = ["--resume", &new_id];
-                match Pane::spawn(id, cli, &cwd, pane_rows.max(10), pane_cols.max(20), &resume_args) {
+                match Pane::spawn(id, CLIType::Claude, &cwd, pane_rows.max(10), pane_cols.max(20), &resume_args) {
                     Ok(mut pane) => {
                         let _ = pane.resize(pane_rows.max(1), pane_cols.max(1));
                         pane.label = Some(label.clone());
-                        let pane_idx = self.panes.len();
+                        let pane_id = pane.id;
                         self.panes.push(pane);
-                        self.focused = pane_idx;
+                        self.focused = self.panes.len() - 1;
                         self.selection = None;
 
                         if let Some(q) = query {
-                            self.pending_input = Some((pane_idx, q, Instant::now()));
+                            self.pending_input = Some((pane_id, q, Instant::now()));
                         }
 
                         self.message = format!("branched → {label} (session {new_id:.8})");
