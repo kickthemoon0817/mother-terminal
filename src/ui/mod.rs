@@ -29,7 +29,7 @@ const BOTTOM_PANEL_HEIGHT: u16 = 5;
 
 /// Known commands for tab autocomplete.
 const COMMANDS: &[&str] = &[
-    "spawn", "kill", "broadcast", "quit", "help", "history", "layout", "alias", "sessions", "!",
+    "spawn", "kill", "broadcast", "quit", "help", "history", "layout", "alias", "sessions", "branch", "!",
 ];
 
 /// Known CLI names for tab autocomplete.
@@ -123,6 +123,8 @@ pub struct App {
     history: Option<HistoryRecorder>,
     stall: StallDetector,
     selection: Option<TextSelection>,
+    /// Pending text to send to a pane after a delay (for branch query).
+    pending_input: Option<(usize, String, Instant)>,
 }
 
 impl App {
@@ -157,6 +159,7 @@ impl App {
             history: HistoryRecorder::new().ok(),
             stall: StallDetector::new(),
             selection: None,
+            pending_input: None,
         }
     }
 
@@ -204,6 +207,15 @@ impl App {
                     pane.status = Status::Dead;
                 }
             }
+
+            // Send pending branch query after delay
+            if let Some((idx, ref text, created)) = self.pending_input.clone()
+                && created.elapsed() > Duration::from_secs(3) {
+                    if let Some(pane) = self.panes.get_mut(idx) {
+                        let _ = pane.send_text(text);
+                    }
+                    self.pending_input = None;
+                }
 
             // Slow tick: history, stall detection, usage parsing (every 2s, not 60fps)
             if self.last_slow_tick.elapsed() > Duration::from_secs(2) {
@@ -510,10 +522,14 @@ impl App {
                 Status::Dead => "✕",
             };
 
-            let project = std::path::Path::new(&pane.cwd)
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| pane.cwd.clone());
+            let project = if let Some(ref lbl) = pane.label {
+                lbl.clone()
+            } else {
+                std::path::Path::new(&pane.cwd)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| pane.cwd.clone())
+            };
 
             let max_name = (self.sidebar_width as usize).saturating_sub(7);
 
@@ -806,6 +822,7 @@ impl App {
             "  :spawn <cli> [--flags] [dir]  start session",
             "  :kill [n]                     kill session",
             "  :broadcast <msg>              send to all",
+            "  :branch <label> [query]       branch Claude session",
             "  :layout                       toggle side/bottom",
             "  :help                         show this help",
             "  :!<cmd>                      run shell command",
@@ -1696,6 +1713,79 @@ impl App {
 
             "help" | "h" => {
                 self.show_help = true;
+            }
+
+            "branch" | "br" => {
+                // :branch <label> [query...]
+                // Branch the focused Claude session into a new pane.
+                if parts.len() < 2 {
+                    self.message = "usage: branch <label> [query...]".to_string();
+                    return;
+                }
+
+                // Focused pane must be a Claude session
+                let (cli, cwd) = match self.panes.get(self.focused) {
+                    Some(pane) if pane.cli == CLIType::Claude => (pane.cli, pane.cwd.clone()),
+                    Some(_) => {
+                        self.message = "branch only works on Claude sessions".to_string();
+                        return;
+                    }
+                    None => {
+                        self.message = "no session to branch from".to_string();
+                        return;
+                    }
+                };
+
+                let label = parts[1].to_string();
+                let query = if parts.len() > 2 {
+                    Some(parts[2..].join(" "))
+                } else {
+                    None
+                };
+
+                // Find and branch the Claude session
+                let session_id = match crate::branch::find_latest_session(&cwd) {
+                    Ok(id) => id,
+                    Err(e) => {
+                        self.message = format!("branch: {e}");
+                        return;
+                    }
+                };
+
+                let new_id = match crate::branch::create_branch(&cwd, &session_id) {
+                    Ok(id) => id,
+                    Err(e) => {
+                        self.message = format!("branch failed: {e}");
+                        return;
+                    }
+                };
+
+                // Spawn a new pane with claude --resume <new_id>
+                let (cols, rows) = self.terminal_size;
+                let pane_rows = rows.saturating_sub(6);
+                let pane_cols = cols.saturating_sub(self.sidebar_width + 3);
+
+                let id = self.panes.len();
+                let resume_args = ["--resume", &new_id];
+                match Pane::spawn(id, cli, &cwd, pane_rows.max(10), pane_cols.max(20), &resume_args) {
+                    Ok(mut pane) => {
+                        let _ = pane.resize(pane_rows.max(1), pane_cols.max(1));
+                        pane.label = Some(label.clone());
+                        let pane_idx = self.panes.len();
+                        self.panes.push(pane);
+                        self.focused = pane_idx;
+                        self.selection = None;
+
+                        if let Some(q) = query {
+                            self.pending_input = Some((pane_idx, q, Instant::now()));
+                        }
+
+                        self.message = format!("branched → {label} (session {new_id:.8})");
+                    }
+                    Err(e) => {
+                        self.message = format!("branch spawn failed: {e}");
+                    }
+                }
             }
 
             "alias" => {

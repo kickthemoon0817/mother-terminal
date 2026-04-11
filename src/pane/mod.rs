@@ -52,6 +52,8 @@ pub struct Pane {
     pub cwd: String,
     pub status: Status,
     pub started: Instant,
+    /// Optional display label (e.g. for branched sessions).
+    pub label: Option<String>,
 
     pub scroll_offset: usize,
 
@@ -117,6 +119,7 @@ impl Pane {
             cwd: cwd.to_string(),
             status: Status::Active,
             started: Instant::now(),
+            label: None,
             scroll_offset: 0,
             writer,
             buffer,

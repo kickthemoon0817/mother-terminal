@@ -1,5 +1,6 @@
 #![deny(unsafe_code)]
 
+mod branch;
 mod history;
 mod monitor;
 mod pane;
