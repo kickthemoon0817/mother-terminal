@@ -1,6 +1,6 @@
 [package]
 name = "mtt"
-version = "0.0.22"
+version = "0.0.23"
 edition = "2024"
 description = "AI-native terminal multiplexer"
 repository = "https://github.com/kickthemoon0817/mother-terminal"
