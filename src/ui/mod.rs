@@ -29,7 +29,7 @@ const BOTTOM_PANEL_HEIGHT: u16 = 5;
 
 /// Known commands for tab autocomplete.
 const COMMANDS: &[&str] = &[
-    "spawn", "kill", "broadcast", "quit", "help", "history", "layout", "alias", "sessions", "branch", "!",
+    "spawn", "kill", "broadcast", "quit", "help", "history", "layout", "alias", "sessions", "branch", "update", "!",
 ];
 
 /// Known CLI names for tab autocomplete.
@@ -824,6 +824,7 @@ impl App {
             "  :broadcast <msg>              send to all",
             "  :branch <label> [query]       branch Claude session",
             "  :layout                       toggle side/bottom",
+            "  :update                       check for updates",
             "  :help                         show this help",
             "  :!<cmd>                      run shell command",
             "  :quit                         exit mtt",
@@ -1655,6 +1656,10 @@ impl App {
                     }
                 }
                 self.message = format!("broadcast to {sent} sessions");
+            }
+
+            "update" => {
+                self.message = "updating mtt... exit and run `mtt update`".to_string();
             }
 
             "quit" | "q" => {
