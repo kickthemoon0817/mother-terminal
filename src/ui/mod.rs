@@ -151,7 +151,7 @@ impl App {
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
             sidebar_dragging: false,
             show_bottom_panel: false,
-            panel_position: PanelPosition::Left,
+            panel_position: PanelPosition::Bottom,
             show_help: false,
             show_session_picker: false,
             picker_cursor: 0,
